@@ -1,0 +1,55 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": "Baseline Renovate policy. Consume with \"extends\": [\"github>rishitank/.github\"].",
+  "extends": [
+    "config:recommended",
+    ":semanticCommits",
+    ":dependencyDashboard",
+    "helpers:pinGitHubActionDigests"
+  ],
+  "timezone": "Europe/London",
+  "schedule": ["* 0-6 * * 1"],
+  "prConcurrentLimit": 5,
+  "prHourlyLimit": 2,
+  "labels": ["dependencies"],
+  "rangeStrategy": "bump",
+  "lockFileMaintenance": {
+    "enabled": true,
+    "schedule": ["* 0-6 1 * *"]
+  },
+  "vulnerabilityAlerts": {
+    "enabled": true,
+    "labels": ["security"],
+    "schedule": null,
+    "prCreation": "immediate",
+    "minimumReleaseAge": null
+  },
+  "packageRules": [
+    {
+      "description": "Group all GitHub Actions bumps into one PR. helpers:pinGitHubActionDigests above converts tags to digests, so this is also what keeps those digests fresh.",
+      "matchManagers": ["github-actions"],
+      "groupName": "github actions",
+      "automerge": true,
+      "automergeType": "pr"
+    },
+    {
+      "description": "Dev tooling churns constantly and cannot break production. Let it through on green CI.",
+      "matchDepTypes": ["devDependencies"],
+      "matchUpdateTypes": ["minor", "patch", "pin", "digest"],
+      "automerge": true,
+      "automergeType": "pr"
+    },
+    {
+      "description": "A major bump is a migration, not an update. Always human-reviewed.",
+      "matchUpdateTypes": ["major"],
+      "automerge": false,
+      "addLabels": ["major-upgrade"],
+      "minimumReleaseAge": "7 days"
+    },
+    {
+      "description": "Let a release sit long enough that someone else finds the regression first.",
+      "matchUpdateTypes": ["minor", "patch"],
+      "minimumReleaseAge": "3 days"
+    }
+  ]
+}

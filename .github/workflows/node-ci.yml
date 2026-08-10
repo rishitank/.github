@@ -1,0 +1,174 @@
+# Reusable Node/TypeScript CI.
+#
+# One job, named steps. The per-repo alternative (separate lint/typecheck/test/
+# build jobs) reinstalls dependencies once per job, which on these repos costs
+# more wall-clock than it buys in status granularity. If a repo genuinely needs
+# independent required status checks, call this workflow more than once with
+# different commands.
+name: node-ci
+
+on:
+  workflow_call:
+    inputs:
+      node-version-file:
+        description: File to read the Node version from. Preferred over node-version.
+        type: string
+        default: .nvmrc
+      node-version:
+        description: Explicit Node version. Only used when node-version-file is absent.
+        type: string
+        default: ""
+      package-manager:
+        description: npm or pnpm.
+        type: string
+        default: npm
+      pnpm-version:
+        description: >-
+          pnpm version. Leave empty to let pnpm/action-setup read
+          packageManager from package.json, which keeps one source of truth.
+        type: string
+        default: ""
+      runs-on:
+        type: string
+        default: ubuntu-latest
+      install:
+        description: Override the install command. Empty derives it from package-manager.
+        type: string
+        default: ""
+      lint:
+        description: Lint command. Empty skips.
+        type: string
+        default: npm run lint
+      typecheck:
+        description: Typecheck command. Empty skips.
+        type: string
+        default: npm run typecheck
+      test:
+        description: Test command. Empty skips.
+        type: string
+        default: npm test
+      build:
+        description: Build command. Empty skips.
+        type: string
+        default: npm run build
+      artifact-name:
+        description: Name for the uploaded build artifact. Empty skips the upload.
+        type: string
+        default: ""
+      artifact-path:
+        description: Path to upload when artifact-name is set.
+        type: string
+        default: dist
+      artifact-retention-days:
+        type: number
+        default: 7
+      timeout-minutes:
+        type: number
+        default: 20
+      env-json:
+        description: JSON object of extra environment variables for every step.
+        type: string
+        default: "{}"
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Check
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: Install pnpm
+        if: inputs.package-manager == 'pnpm'
+        uses: pnpm/action-setup@v6.0.10
+        with:
+          version: ${{ inputs.pnpm-version }}
+
+      # node-version-file wins when the file exists, so a repo with .nvmrc has a
+      # single source of truth shared with local dev, and repos without one can
+      # still pass an explicit version.
+      - name: Resolve Node version source
+        id: node
+        run: |
+          set -euo pipefail
+          if [ -n "${VERSION_FILE}" ] && [ -f "${VERSION_FILE}" ]; then
+            echo "file=${VERSION_FILE}" >> "$GITHUB_OUTPUT"
+            echo "version=" >> "$GITHUB_OUTPUT"
+            echo "Using ${VERSION_FILE} ($(cat "${VERSION_FILE}"))"
+          elif [ -n "${VERSION}" ]; then
+            echo "file=" >> "$GITHUB_OUTPUT"
+            echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+            echo "::warning title=No version file::Node version is hardcoded in CI. Add a ${VERSION_FILE:-.nvmrc} so local dev and CI cannot drift."
+          else
+            echo "::error title=No Node version::Neither node-version-file nor node-version resolved to anything."
+            exit 1
+          fi
+        env:
+          VERSION_FILE: ${{ inputs.node-version-file }}
+          VERSION: ${{ inputs.node-version }}
+
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version-file: ${{ steps.node.outputs.file }}
+          node-version: ${{ steps.node.outputs.version }}
+          cache: ${{ inputs.package-manager }}
+
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          if [ -n "${INSTALL}" ]; then
+            ${INSTALL}
+          elif [ "${PM}" = "pnpm" ]; then
+            pnpm install --frozen-lockfile
+          else
+            npm ci
+          fi
+        env:
+          INSTALL: ${{ inputs.install }}
+          PM: ${{ inputs.package-manager }}
+
+      - name: Load extra environment
+        if: inputs.env-json != '{}'
+        run: |
+          set -euo pipefail
+          node -e '
+            const raw = process.env.ENV_JSON || "{}";
+            const obj = JSON.parse(raw);
+            const fs = require("fs");
+            for (const [k, v] of Object.entries(obj)) {
+              if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(k)) throw new Error("bad env name: " + k);
+              fs.appendFileSync(process.env.GITHUB_ENV, `${k}<<__EOF__\n${v}\n__EOF__\n`);
+            }
+          '
+        env:
+          ENV_JSON: ${{ inputs.env-json }}
+
+      - name: Lint
+        if: inputs.lint != ''
+        run: ${{ inputs.lint }}
+
+      - name: Typecheck
+        if: inputs.typecheck != ''
+        run: ${{ inputs.typecheck }}
+
+      - name: Test
+        if: inputs.test != ''
+        run: ${{ inputs.test }}
+
+      - name: Build
+        if: inputs.build != ''
+        run: ${{ inputs.build }}
+
+      - name: Upload build artifact
+        if: inputs.artifact-name != ''
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: ${{ inputs.artifact-name }}
+          path: ${{ inputs.artifact-path }}
+          retention-days: ${{ inputs.artifact-retention-days }}
+          if-no-files-found: error

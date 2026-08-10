@@ -1,0 +1,33 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": "Node/TypeScript policy. Consume with \"extends\": [\"github>rishitank/.github:node\"].",
+  "extends": ["github>rishitank/.github"],
+  "packageRules": [
+    {
+      "description": "Node itself is pinned by .nvmrc and mirrored into Docker and CI. A bump here is a coordinated change across all three.",
+      "matchDepNames": ["node"],
+      "automerge": false,
+      "addLabels": ["runtime-upgrade"]
+    },
+    {
+      "description": "The package manager version lives in packageManager and is mirrored into the Dockerfile. Same coordination problem as Node.",
+      "matchDepNames": ["pnpm", "npm"],
+      "automerge": false,
+      "addLabels": ["runtime-upgrade"]
+    },
+    {
+      "description": "Framework majors reshape the app. Never automerged, and given time to settle.",
+      "matchPackageNames": ["next", "react", "react-dom", "typescript", "tailwindcss"],
+      "matchUpdateTypes": ["major"],
+      "automerge": false,
+      "minimumReleaseAge": "14 days"
+    },
+    {
+      "description": "Test tooling is safe to take quickly; a break shows up immediately and only in CI.",
+      "matchPackageNames": ["vitest", "@vitest/**", "@playwright/test", "playwright"],
+      "matchUpdateTypes": ["minor", "patch"],
+      "groupName": "test tooling",
+      "automerge": true
+    }
+  ]
+}

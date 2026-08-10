@@ -1,0 +1,88 @@
+# This repository's own CI. A broken workflow here breaks every consuming repo
+# at once, so it lints itself before anything can merge.
+name: self-check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: self-check-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  actionlint:
+    name: actionlint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: Install actionlint
+        run: |
+          set -euo pipefail
+          latest=$(
+            curl -fsSL --retry 2 \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              https://api.github.com/repos/rhysd/actionlint/releases/latest \
+              | grep -m1 -oE '"tag_name"[[:space:]]*:[[:space:]]*"v[0-9]+\.[0-9]+\.[0-9]+"' \
+              | sed -E 's/.*"(v[0-9]+\.[0-9]+\.[0-9]+)".*/\1/'
+          ) || true
+          [ -n "${latest:-}" ] || latest="v1.7.7"
+          curl -fsSL --retry 3 \
+            "https://github.com/rhysd/actionlint/releases/download/${latest}/actionlint_${latest#v}_linux_amd64.tar.gz" \
+            -o /tmp/actionlint.tar.gz
+          tar -xzf /tmp/actionlint.tar.gz -C /tmp actionlint
+          sudo install -m 0755 /tmp/actionlint /usr/local/bin/actionlint
+          actionlint -version
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Lint workflows
+        run: actionlint -color
+
+  presets:
+    name: Renovate presets
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: Validate preset JSON
+        run: |
+          set -euo pipefail
+          for f in ./*.json; do
+            python3 -c "import json,sys; json.load(open(sys.argv[1]))" "$f"
+            echo "ok  $f"
+          done
+
+      # A preset that extends a repo path that does not exist fails silently at
+      # Renovate run time, on every consuming repo, with no PR to notice.
+      - name: Check preset cross-references resolve
+        run: |
+          set -euo pipefail
+          fail=0
+          while IFS= read -r ref; do
+            preset="${ref##*:}"
+            if [ "$preset" = "$ref" ]; then
+              target="default.json"
+            else
+              target="${preset}.json"
+            fi
+            if [ ! -f "$target" ]; then
+              echo "::error::preset reference '$ref' resolves to missing file '$target'"
+              fail=1
+            else
+              echo "ok  $ref -> $target"
+            fi
+          done < <(grep -ho 'github>[^"]*' ./*.json | sort -u)
+          exit $fail

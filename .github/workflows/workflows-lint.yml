@@ -1,0 +1,96 @@
+# Reusable actionlint runner.
+#
+# Ported from talos-automaton's composite action. Resolves the latest actionlint
+# at run time and caches the binary by resolved version, so the tool stays
+# current without a version string to maintain, and falls back to a known-good
+# release if the API call fails.
+#
+# Cheap and worth running on every repo that has workflows: it catches YAML
+# errors, bad `uses:` refs, undefined contexts and shellcheck issues in `run:`
+# blocks before they cost a red build.
+name: workflows-lint
+
+on:
+  workflow_call:
+    inputs:
+      runs-on:
+        type: string
+        default: ubuntu-latest
+      fallback-version:
+        description: Used only if the GitHub API cannot be reached.
+        type: string
+        default: v1.7.7
+      shellcheck:
+        description: Let actionlint run shellcheck over `run:` blocks.
+        type: boolean
+        default: true
+      timeout-minutes:
+        type: number
+        default: 10
+
+permissions:
+  contents: read
+
+jobs:
+  actionlint:
+    name: actionlint
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: Resolve latest actionlint
+        id: resolve
+        run: |
+          set -uo pipefail
+          latest=$(
+            curl -fsSL --retry 2 \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              https://api.github.com/repos/rhysd/actionlint/releases/latest \
+              | grep -m1 -oE '"tag_name"[[:space:]]*:[[:space:]]*"v[0-9]+\.[0-9]+\.[0-9]+"' \
+              | sed -E 's/.*"(v[0-9]+\.[0-9]+\.[0-9]+)".*/\1/'
+          ) || true
+          if [ -z "${latest:-}" ]; then
+            echo "::warning title=Version resolution failed::Could not reach the GitHub API; falling back to ${FALLBACK}."
+            latest="${FALLBACK}"
+          fi
+          echo "tag=${latest}" >> "$GITHUB_OUTPUT"
+          echo "version=${latest#v}" >> "$GITHUB_OUTPUT"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FALLBACK: ${{ inputs.fallback-version }}
+
+      - name: Cache actionlint
+        id: cache
+        uses: actions/cache@v6.1.0
+        with:
+          path: ${{ github.workspace }}/.cache/actionlint
+          key: ${{ runner.os }}-actionlint-${{ steps.resolve.outputs.version }}
+
+      - name: Install actionlint
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p "${GITHUB_WORKSPACE}/.cache/actionlint"
+          url="https://github.com/rhysd/actionlint/releases/download/${TAG}/actionlint_${VERSION}_linux_amd64.tar.gz"
+          curl -fsSL --retry 3 "$url" -o /tmp/actionlint.tar.gz
+          tar -xzf /tmp/actionlint.tar.gz -C "${GITHUB_WORKSPACE}/.cache/actionlint" actionlint
+          chmod +x "${GITHUB_WORKSPACE}/.cache/actionlint/actionlint"
+        env:
+          TAG: ${{ steps.resolve.outputs.tag }}
+          VERSION: ${{ steps.resolve.outputs.version }}
+
+      - name: Run actionlint
+        run: |
+          set -euo pipefail
+          bin="${GITHUB_WORKSPACE}/.cache/actionlint/actionlint"
+          "$bin" -version
+          if [ "${SHELLCHECK}" = "true" ]; then
+            "$bin" -color
+          else
+            "$bin" -color -shellcheck=
+          fi
+        env:
+          SHELLCHECK: ${{ inputs.shellcheck }}

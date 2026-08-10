@@ -1,0 +1,166 @@
+# Reusable lockfile regeneration bot.
+#
+# Unifies three near-identical implementations (rishitank-portfolio,
+# rishitank-recipes, quarterdeck) and keeps the non-obvious correctness
+# properties all three discovered independently:
+#
+#   * stage before diffing. `git diff --quiet` compares the index to the
+#     worktree and is blind to untracked files, so a lockfile that does not yet
+#     exist reads as "nothing to commit". Stage first, then diff --cached.
+#   * refuse to proceed if the resolver rewrote package.json. Regenerating a
+#     lockfile must not silently change declared dependency ranges.
+#   * prove the result. A lockfile that resolves but cannot be installed
+#     frozen is worse than no change at all.
+name: lockfile
+
+on:
+  workflow_call:
+    inputs:
+      package-manager:
+        description: npm or pnpm.
+        type: string
+        default: npm
+      pnpm-version:
+        type: string
+        default: ""
+      node-version-file:
+        type: string
+        default: .nvmrc
+      node-version:
+        type: string
+        default: ""
+      runs-on:
+        type: string
+        default: ubuntu-latest
+      verify:
+        description: Command proving the regenerated lockfile actually installs and builds.
+        type: string
+        default: ""
+      timeout-minutes:
+        type: number
+        default: 20
+
+permissions:
+  contents: read
+
+jobs:
+  lockfile:
+    name: Regenerate lockfile
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: Install pnpm
+        if: inputs.package-manager == 'pnpm'
+        uses: pnpm/action-setup@v6.0.10
+        with:
+          version: ${{ inputs.pnpm-version }}
+
+      - name: Resolve Node version source
+        id: node
+        run: |
+          set -euo pipefail
+          if [ -n "${VERSION_FILE}" ] && [ -f "${VERSION_FILE}" ]; then
+            echo "file=${VERSION_FILE}" >> "$GITHUB_OUTPUT"
+            echo "version=" >> "$GITHUB_OUTPUT"
+          elif [ -n "${VERSION}" ]; then
+            echo "file=" >> "$GITHUB_OUTPUT"
+            echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error title=No Node version::Neither node-version-file nor node-version resolved to anything."
+            exit 1
+          fi
+        env:
+          VERSION_FILE: ${{ inputs.node-version-file }}
+          VERSION: ${{ inputs.node-version }}
+
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version-file: ${{ steps.node.outputs.file }}
+          node-version: ${{ steps.node.outputs.version }}
+
+      - name: Record package.json checksum
+        id: before
+        run: echo "sum=$(sha256sum package.json | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve dependencies
+        run: |
+          set -euo pipefail
+          if [ "${PM}" = "pnpm" ]; then
+            pnpm install --lockfile-only
+          else
+            npm install --package-lock-only
+          fi
+        env:
+          PM: ${{ inputs.package-manager }}
+
+      - name: Refuse if package.json was rewritten
+        run: |
+          set -euo pipefail
+          after=$(sha256sum package.json | cut -d' ' -f1)
+          if [ "$after" != "${BEFORE}" ]; then
+            echo "::error title=package.json modified::The resolver rewrote package.json. Regenerating a lockfile must not change declared ranges. Review and commit that change deliberately."
+            git --no-pager diff -- package.json
+            exit 1
+          fi
+        env:
+          BEFORE: ${{ steps.before.outputs.sum }}
+
+      - name: Determine lockfile
+        id: lock
+        run: |
+          set -euo pipefail
+          if [ "${PM}" = "pnpm" ]; then
+            echo "path=pnpm-lock.yaml" >> "$GITHUB_OUTPUT"
+          else
+            echo "path=package-lock.json" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          PM: ${{ inputs.package-manager }}
+
+      # Stage first. `git diff --quiet` cannot see an untracked file, so a
+      # brand-new lockfile would otherwise report as "already up to date".
+      - name: Stage and check for changes
+        id: changed
+        run: |
+          set -euo pipefail
+          git add -- "${LOCKFILE}"
+          if git diff --cached --quiet -- "${LOCKFILE}"; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "${LOCKFILE} already up to date; nothing to commit."
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "${LOCKFILE}: $(wc -l < "${LOCKFILE}") lines"
+          fi
+        env:
+          LOCKFILE: ${{ steps.lock.outputs.path }}
+
+      - name: Prove the lockfile installs frozen
+        if: steps.changed.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          if [ "${PM}" = "pnpm" ]; then
+            pnpm install --frozen-lockfile
+          else
+            npm ci
+          fi
+        env:
+          PM: ${{ inputs.package-manager }}
+
+      - name: Prove the project still builds
+        if: steps.changed.outputs.changed == 'true' && inputs.verify != ''
+        run: ${{ inputs.verify }}
+
+      - name: Commit
+        if: steps.changed.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "chore: regenerate ${LOCKFILE}"
+          git push
+        env:
+          LOCKFILE: ${{ steps.lock.outputs.path }}

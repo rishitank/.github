@@ -1,0 +1,36 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": "Python policy. Consume with \"extends\": [\"github>rishitank/.github:python\"].",
+  "extends": ["github>rishitank/.github"],
+  "packageRules": [
+    {
+      "description": "Lint and type tooling gates the build. A minor bump can introduce a new rule and turn CI red, so take these deliberately.",
+      "matchPackageNames": ["ruff", "mypy", "pip-audit"],
+      "automerge": false,
+      "addLabels": ["tooling-upgrade"]
+    },
+    {
+      "description": "The scientific stack has tight ABI coupling. Bump these together or not at all.",
+      "matchPackageNames": [
+        "numpy",
+        "scipy",
+        "scikit-fem",
+        "shapely",
+        "adaptmesh",
+        "ezdxf",
+        "svgelements"
+      ],
+      "groupName": "scientific stack",
+      "automerge": false,
+      "minimumReleaseAge": "14 days"
+    },
+    {
+      "description": "Agent-framework majors change execution semantics, which is exactly where the resume/billing invariants live.",
+      "matchPackageNames": ["langgraph", "langchain**"],
+      "matchUpdateTypes": ["major"],
+      "automerge": false,
+      "minimumReleaseAge": "14 days",
+      "addLabels": ["needs-verify-py"]
+    }
+  ]
+}

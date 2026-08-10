@@ -1,0 +1,21 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": "Rust policy. Consume with \"extends\": [\"github>rishitank/.github:rust\"].",
+  "extends": ["github>rishitank/.github"],
+  "packageRules": [
+    {
+      "description": "Async runtime and web framework majors are migrations.",
+      "matchPackageNames": ["tokio", "axum", "hyper", "sqlx", "reqwest"],
+      "matchUpdateTypes": ["major"],
+      "automerge": false,
+      "minimumReleaseAge": "14 days"
+    },
+    {
+      "description": "Patch bumps across the crate graph are noisy individually and useful together.",
+      "matchManagers": ["cargo"],
+      "matchUpdateTypes": ["patch"],
+      "groupName": "cargo patch updates",
+      "automerge": true
+    }
+  ]
+}

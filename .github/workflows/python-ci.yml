@@ -1,0 +1,240 @@
+# Reusable Python CI.
+#
+# Consolidates the `verify.py` gate pattern used across the Python estate and
+# adds the lint/typecheck layer that was previously missing everywhere.
+#
+# The optional sibling-repo checkout ports the graceful-degradation pattern from
+# tankster-books: if the private sibling can't be checked out (missing/expired
+# token) or is too old to expose the module under test, the job degrades to a
+# unit-only run with a written explanation instead of going red for a reason
+# that has nothing to do with the change under review.
+name: python-ci
+
+on:
+  workflow_call:
+    inputs:
+      python-version:
+        description: Python version to run against.
+        type: string
+        default: "3.12"
+      runs-on:
+        description: Runner label.
+        type: string
+        default: ubuntu-latest
+      install:
+        description: Command that installs the package under test.
+        type: string
+        default: pip install -e .
+      extra-install:
+        description: Extra install step run after `install` (e.g. test-only deps).
+        type: string
+        default: ""
+      verify:
+        description: The quality gate. Definition of done for the repo.
+        type: string
+        default: python verify.py
+      lint:
+        description: Run ruff check + ruff format --check.
+        type: boolean
+        default: true
+      lint-strict:
+        description: >-
+          Fail the build on lint findings. Start false on a repo that has never
+          been linted, fix the backlog, then flip to true. Leaving this false
+          forever defeats the point.
+        type: boolean
+        default: false
+      lint-paths:
+        description: Paths ruff should look at.
+        type: string
+        default: "."
+      ruff-version:
+        description: Pinned ruff version. Empty means latest, which makes CI non-reproducible.
+        type: string
+        default: ""
+      typecheck:
+        description: Run mypy.
+        type: boolean
+        default: false
+      typecheck-strict:
+        description: Fail the build on mypy findings.
+        type: boolean
+        default: false
+      typecheck-paths:
+        description: Paths mypy should look at.
+        type: string
+        default: "."
+      sibling-repo:
+        description: >-
+          Optional private repo to check out and install first (e.g.
+          TanksterAI/tankster-core). Requires the `ci-token` secret.
+        type: string
+        default: ""
+      sibling-probe-module:
+        description: >-
+          Python module imported to decide whether the sibling is new enough for
+          the integration checks. Empty skips the freshness probe.
+        type: string
+        default: ""
+      sibling-install:
+        description: Command that installs the sibling once checked out.
+        type: string
+        default: ""
+      timeout-minutes:
+        description: Hard cap on job runtime.
+        type: number
+        default: 15
+    secrets:
+      ci-token:
+        description: Fine-grained PAT with read access to `sibling-repo`.
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint
+    if: inputs.lint
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - uses: actions/setup-python@v7.0.0
+        with:
+          python-version: ${{ inputs.python-version }}
+
+      - name: Install ruff
+        run: |
+          set -euo pipefail
+          if [ -n "${RUFF_VERSION}" ]; then
+            pip install "ruff==${RUFF_VERSION}"
+          else
+            echo "::warning title=Unpinned linter::ruff is unpinned; a new ruff release can turn this build red without a code change. Set the ruff-version input."
+            pip install ruff
+          fi
+        env:
+          RUFF_VERSION: ${{ inputs.ruff-version }}
+
+      - name: ruff check
+        continue-on-error: ${{ !inputs.lint-strict }}
+        run: ruff check --output-format=github ${{ inputs.lint-paths }}
+
+      - name: ruff format --check
+        continue-on-error: ${{ !inputs.lint-strict }}
+        run: ruff format --check --diff ${{ inputs.lint-paths }}
+
+      - name: Note advisory mode
+        if: ${{ !inputs.lint-strict }}
+        run: |
+          {
+            echo "### Lint is advisory"
+            echo
+            echo "\`lint-strict\` is false, so ruff findings above did not fail the build."
+            echo "Clear the backlog, then set \`lint-strict: true\` in this repo's caller workflow."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  typecheck:
+    name: Typecheck
+    if: inputs.typecheck
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - uses: actions/setup-python@v7.0.0
+        with:
+          python-version: ${{ inputs.python-version }}
+
+      - name: Install
+        run: |
+          set -euo pipefail
+          ${{ inputs.install }}
+          pip install mypy
+
+      - name: mypy
+        continue-on-error: ${{ !inputs.typecheck-strict }}
+        run: mypy ${{ inputs.typecheck-paths }}
+
+  verify:
+    name: Verify
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - uses: actions/setup-python@v7.0.0
+        with:
+          python-version: ${{ inputs.python-version }}
+
+      # continue-on-error is deliberate: a missing token is an infrastructure
+      # problem, not a reason to fail the contributor's PR.
+      - name: Check out sibling repo
+        id: sibling
+        if: inputs.sibling-repo != ''
+        continue-on-error: true
+        uses: actions/checkout@v7.0.1
+        with:
+          repository: ${{ inputs.sibling-repo }}
+          token: ${{ secrets.ci-token }}
+          path: _sibling
+
+      - name: Install sibling
+        id: sibling_install
+        if: inputs.sibling-repo != ''
+        run: |
+          set -euo pipefail
+          if [ ! -d _sibling ]; then
+            echo "state=missing-token" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          ${{ inputs.sibling-install }}
+          if [ -z "${PROBE}" ]; then
+            echo "state=ok" >> "$GITHUB_OUTPUT"
+          elif python -c "import ${PROBE}" 2>/dev/null; then
+            echo "state=ok" >> "$GITHUB_OUTPUT"
+          else
+            echo "state=too-old" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          PROBE: ${{ inputs.sibling-probe-module }}
+
+      - name: Install
+        run: |
+          set -euo pipefail
+          ${{ inputs.install }}
+
+      - name: Extra install
+        if: inputs.extra-install != ''
+        run: |
+          set -euo pipefail
+          ${{ inputs.extra-install }}
+
+      - name: Verify
+        run: |
+          set -euo pipefail
+          ${{ inputs.verify }}
+
+      - name: Report integration coverage
+        if: always() && inputs.sibling-repo != ''
+        run: |
+          case "${{ steps.sibling_install.outputs.state }}" in
+            ok)
+              echo "Full suite: \`${{ inputs.sibling-repo }}\` present, integration checks ran." >> "$GITHUB_STEP_SUMMARY"
+              ;;
+            too-old)
+              echo "::warning title=Integration checks skipped::${{ inputs.sibling-repo }} is installed but does not expose ${{ inputs.sibling-probe-module }}. Unit checks only."
+              echo "Partial suite: \`${{ inputs.sibling-repo }}\` is too old (no \`${{ inputs.sibling-probe-module }}\`). Unit checks only." >> "$GITHUB_STEP_SUMMARY"
+              ;;
+            *)
+              echo "::warning title=Integration checks skipped::${{ inputs.sibling-repo }} could not be checked out. Check the ci-token secret."
+              echo "Partial suite: \`${{ inputs.sibling-repo }}\` could not be checked out. Check the \`ci-token\` secret. Unit checks only." >> "$GITHUB_STEP_SUMMARY"
+              ;;
+          esac
