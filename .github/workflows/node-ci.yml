@@ -92,7 +92,13 @@ jobs:
       # node-version-file wins when the file exists, so a repo with .nvmrc has a
       # single source of truth shared with local dev, and repos without one can
       # still pass an explicit version.
-      - name: Resolve Node version source
+      #
+      # Lockfile presence is resolved here too. setup-node's `cache` input hard
+      # fails with "Dependencies lock file is not found" when there is no
+      # lockfile, so caching has to be switched off rather than left on — and
+      # `npm ci` / `pnpm install --frozen-lockfile` would fail for the same
+      # reason, so the install falls back too.
+      - name: Resolve Node version and lockfile
         id: node
         run: |
           set -euo pipefail
@@ -108,15 +114,30 @@ jobs:
             echo "::error title=No Node version::Neither node-version-file nor node-version resolved to anything."
             exit 1
           fi
+
+          if [ "${PM}" = "pnpm" ]; then
+            lock="pnpm-lock.yaml"
+          else
+            lock="package-lock.json"
+          fi
+          if [ -f "$lock" ] || [ -f npm-shrinkwrap.json ] || [ -f yarn.lock ]; then
+            echo "lockfile=true" >> "$GITHUB_OUTPUT"
+            echo "cache=${PM}" >> "$GITHUB_OUTPUT"
+          else
+            echo "lockfile=false" >> "$GITHUB_OUTPUT"
+            echo "cache=" >> "$GITHUB_OUTPUT"
+            echo "::warning title=No lockfile::${lock} is not committed, so dependency caching is off and installs resolve fresh every run. CI is not testing a reproducible dependency tree. Commit a lockfile."
+          fi
         env:
           VERSION_FILE: ${{ inputs.node-version-file }}
           VERSION: ${{ inputs.node-version }}
+          PM: ${{ inputs.package-manager }}
 
       - uses: actions/setup-node@v7.0.0
         with:
           node-version-file: ${{ steps.node.outputs.file }}
           node-version: ${{ steps.node.outputs.version }}
-          cache: ${{ inputs.package-manager }}
+          cache: ${{ steps.node.outputs.cache }}
 
       - name: Install dependencies
         run: |
@@ -124,13 +145,20 @@ jobs:
           if [ -n "${INSTALL}" ]; then
             ${INSTALL}
           elif [ "${PM}" = "pnpm" ]; then
-            pnpm install --frozen-lockfile
-          else
+            if [ "${HAS_LOCK}" = "true" ]; then
+              pnpm install --frozen-lockfile
+            else
+              pnpm install
+            fi
+          elif [ "${HAS_LOCK}" = "true" ]; then
             npm ci
+          else
+            npm install
           fi
         env:
           INSTALL: ${{ inputs.install }}
           PM: ${{ inputs.package-manager }}
+          HAS_LOCK: ${{ steps.node.outputs.lockfile }}
 
       - name: Load extra environment
         if: inputs.env-json != '{}'
