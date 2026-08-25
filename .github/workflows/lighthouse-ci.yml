@@ -95,6 +95,12 @@ jobs:
       pull-requests: write
     steps:
       - uses: actions/checkout@v7.0.1
+        with:
+          # This job runs npx-fetched third-party code (@lhci/cli) and holds
+          # pull-requests: write. Neither needs a persisted git credential —
+          # nothing here pushes — so don't leave one sitting in the local git
+          # config for the rest of the job to potentially read.
+          persist-credentials: false
 
       - name: Install pnpm
         if: inputs.package-manager == 'pnpm'
@@ -144,6 +150,12 @@ jobs:
           node-version-file: ${{ steps.node.outputs.file }}
           node-version: ${{ steps.node.outputs.version }}
           cache: ${{ steps.node.outputs.cache }}
+          # setup-node v7 auto-enables npm caching from package.json's
+          # packageManager/devEngines field independently of the `cache`
+          # input above, so a lockfile-less repo would still hit a cache
+          # restore step with nothing to key on. Tie it to the same
+          # lockfile check.
+          package-manager-cache: ${{ steps.node.outputs.lockfile == 'true' }}
 
       - name: Install dependencies
         run: |
@@ -183,6 +195,10 @@ jobs:
           done
           echo "found=false" >> "$GITHUB_OUTPUT"
           echo "::error title=No lighthouserc file::lhci autorun has nothing to collect/assert/upload without one. Add lighthouserc.json — see lighthouserc.example.json in this repository — before calling this workflow."
+          # Without this, every later step's `if: steps.config.outputs.found
+          # == 'true'` guard just skips and the job reports success having
+          # audited nothing — a silent no-op dressed up as a green check.
+          exit 1
 
       - name: Lighthouse CI
         if: steps.config.outputs.found == 'true'
@@ -207,6 +223,11 @@ jobs:
         if: >-
           always() && inputs.comment && steps.config.outputs.found == 'true' &&
           github.event_name == 'pull_request'
+        # A PR from a fork (or Dependabot) gets a read-only GITHUB_TOKEN no
+        # matter what this job's own permissions block asks for, regardless
+        # of strict. Losing the comment shouldn't fail the check — the
+        # Lighthouse run itself already succeeded or failed on its own terms.
+        continue-on-error: true
         uses: actions/github-script@v9.0.0
         env:
           STRICT: ${{ inputs.strict }}
