@@ -164,6 +164,10 @@ jobs:
         if: inputs.env-json != '{}'
         run: |
           set -euo pipefail
+          # shellcheck disable=SC2016
+          # Single-quoted on purpose: this is a JS template literal
+          # (${k}/\n), not a shell expansion — double-quoting would let bash
+          # try to expand $k itself before node ever sees the script.
           node -e '
             const raw = process.env.ENV_JSON || "{}";
             const obj = JSON.parse(raw);

@@ -84,5 +84,11 @@ jobs:
             else
               echo "ok  $ref -> $target"
             fi
-          done < <(grep -ho 'github>[^"]*' ./*.json | sort -u)
+          # Anchored to a strict github>owner/repo(:preset)? charset so a
+          # description string that merely *mentions* a reference (with a
+          # trailing sentence period, or a backslash-escaped quote from JSON
+          # like "...\"github>owner/repo:node\".") can't be swept in as if it
+          # were a real cross-reference — grep -o's old `[^"]*` matched right
+          # up to the next literal `"`, which an escaped `\"` isn't.
+          done < <(grep -hoE 'github>[A-Za-z0-9._/-]+(:[A-Za-z0-9_-]+)?' ./*.json | sort -u)
           exit $fail
