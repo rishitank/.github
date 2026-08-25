@@ -1,0 +1,31 @@
+name: _tmp-move-tag
+
+on:
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: Commit SHA to point v1 at.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  move-tag:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: Move v1
+        run: |
+          set -euo pipefail
+          git config user.email "actions@github.com"
+          git config user.name "github-actions"
+          git tag -f v1 "${SHA}"
+          git push origin v1 --force
+        env:
+          SHA: ${{ inputs.sha }}
