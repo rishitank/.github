@@ -1,0 +1,300 @@
+# Reusable Lighthouse CI.
+#
+# Deliberately does not prescribe URLs, ports, or a startServerCommand: those
+# live in the consuming repo's own lighthouserc.json/.js/.cjs, which
+# `lhci autorun` discovers on its own. A repo that has already hand-tuned its
+# budgets (multi-page runs, a non-default port, per-metric thresholds) keeps
+# them exactly as authored — this workflow only supplies the CI plumbing
+# around them: Node setup, the audit run, an artifact upload, and a sticky PR
+# comment with the score table, which is the part every repo was missing.
+#
+# A repo with no lighthouserc file yet needs one before this does anything
+# useful — see lighthouserc.example.json in this repository for a starting
+# point pitched at the advisory-first house style (warn, not error).
+name: lighthouse-ci
+
+on:
+  workflow_call:
+    inputs:
+      node-version-file:
+        description: File to read the Node version from. Preferred over node-version.
+        type: string
+        default: .nvmrc
+      node-version:
+        description: Explicit Node version. Only used when node-version-file is absent.
+        type: string
+        default: ""
+      package-manager:
+        description: npm or pnpm.
+        type: string
+        default: npm
+      pnpm-version:
+        description: >-
+          pnpm version. Leave empty to let pnpm/action-setup read
+          packageManager from package.json, which keeps one source of truth.
+        type: string
+        default: ""
+      install:
+        description: Override the install command. Empty derives it from package-manager.
+        type: string
+        default: ""
+      build:
+        description: >-
+          Build command, run before lhci autorun. Set to "" only if the
+          lighthouserc file's own startServerCommand builds as part of
+          starting — uncommon, but some setups do it that way.
+        type: string
+        default: npm run build
+      lhci-version:
+        description: >-
+          @lhci/cli version to pin. Keep this in step across repos so a
+          budget regression can't hide behind a tool-version difference.
+        type: string
+        default: 0.14.x
+      strict:
+        description: >-
+          Fail the job when lhci autorun exits non-zero. Advisory (false) by
+          default — matches lint-strict/audit-strict in node-ci.yml and
+          security.yml. This does not touch the assertions themselves (warn
+          vs error, and their thresholds are whatever the repo's own
+          lighthouserc file says) — it only controls whether a failure blocks
+          the job. A repo that wants "advisory on PRs, blocking on protected
+          branches" (rather than one fixed value) can compute this input from
+          github.event_name in the caller — see the README for the exact
+          expression, spelled out here without the interpolation markers so
+          actionlint doesn't try to evaluate it as this workflow's own
+          expression: "strict:" followed by a GitHub Actions expression
+          testing github.event_name != 'pull_request'.
+        type: boolean
+        default: false
+      comment:
+        description: Post or update a sticky PR comment with the score table.
+        type: boolean
+        default: true
+      runs-on:
+        type: string
+        default: ubuntu-latest
+      timeout-minutes:
+        type: number
+        default: 15
+
+permissions:
+  contents: read
+
+jobs:
+  lighthouse:
+    name: Lighthouse CI
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+      # Only needed for the sticky comment step. The caller's own permissions
+      # block for *this job* is still the ceiling — see node-ci.yml's note on
+      # this — so a caller wanting the comment must grant pull-requests:
+      # write on the job that calls this workflow.
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: Install pnpm
+        if: inputs.package-manager == 'pnpm'
+        uses: pnpm/action-setup@v6.0.10
+        with:
+          version: ${{ inputs.pnpm-version }}
+
+      # Same version/lockfile resolution as node-ci.yml, duplicated rather
+      # than shared: a workflow_call job can't compose another workflow_call
+      # job as a step, only delegate the whole job to it.
+      - name: Resolve Node version and lockfile
+        id: node
+        run: |
+          set -euo pipefail
+          if [ -n "${VERSION_FILE}" ] && [ -f "${VERSION_FILE}" ]; then
+            echo "file=${VERSION_FILE}" >> "$GITHUB_OUTPUT"
+            echo "version=" >> "$GITHUB_OUTPUT"
+          elif [ -n "${VERSION}" ]; then
+            echo "file=" >> "$GITHUB_OUTPUT"
+            echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+            echo "::warning title=No version file::Node version is hardcoded in CI. Add a ${VERSION_FILE:-.nvmrc} so local dev and CI cannot drift."
+          else
+            echo "::error title=No Node version::Neither node-version-file nor node-version resolved to anything."
+            exit 1
+          fi
+
+          if [ "${PM}" = "pnpm" ]; then
+            lock="pnpm-lock.yaml"
+          else
+            lock="package-lock.json"
+          fi
+          if [ -f "$lock" ] || [ -f npm-shrinkwrap.json ] || [ -f yarn.lock ]; then
+            echo "lockfile=true" >> "$GITHUB_OUTPUT"
+            echo "cache=${PM}" >> "$GITHUB_OUTPUT"
+          else
+            echo "lockfile=false" >> "$GITHUB_OUTPUT"
+            echo "cache=" >> "$GITHUB_OUTPUT"
+            echo "::warning title=No lockfile::${lock} is not committed, so dependency caching is off and installs resolve fresh every run."
+          fi
+        env:
+          VERSION_FILE: ${{ inputs.node-version-file }}
+          VERSION: ${{ inputs.node-version }}
+          PM: ${{ inputs.package-manager }}
+
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version-file: ${{ steps.node.outputs.file }}
+          node-version: ${{ steps.node.outputs.version }}
+          cache: ${{ steps.node.outputs.cache }}
+
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          if [ -n "${INSTALL}" ]; then
+            ${INSTALL}
+          elif [ "${PM}" = "pnpm" ]; then
+            if [ "${HAS_LOCK}" = "true" ]; then
+              pnpm install --frozen-lockfile
+            else
+              pnpm install
+            fi
+          elif [ "${HAS_LOCK}" = "true" ]; then
+            npm ci
+          else
+            npm install
+          fi
+        env:
+          INSTALL: ${{ inputs.install }}
+          PM: ${{ inputs.package-manager }}
+          HAS_LOCK: ${{ steps.node.outputs.lockfile }}
+
+      - name: Build
+        if: inputs.build != ''
+        run: ${{ inputs.build }}
+
+      - name: Check for a lighthouserc file
+        id: config
+        run: |
+          set -euo pipefail
+          for f in lighthouserc.json lighthouserc.js lighthouserc.cjs .lighthouserc.json .lighthouserc.js .lighthouserc.cjs; do
+            if [ -f "$f" ]; then
+              echo "found=true" >> "$GITHUB_OUTPUT"
+              echo "Found $f"
+              exit 0
+            fi
+          done
+          echo "found=false" >> "$GITHUB_OUTPUT"
+          echo "::error title=No lighthouserc file::lhci autorun has nothing to collect/assert/upload without one. Add lighthouserc.json — see lighthouserc.example.json in this repository — before calling this workflow."
+
+      - name: Lighthouse CI
+        if: steps.config.outputs.found == 'true'
+        id: lhci
+        continue-on-error: ${{ !inputs.strict }}
+        run: npx --yes @lhci/cli@${{ inputs.lhci-version }} autorun
+
+      - name: Upload Lighthouse results
+        if: always() && steps.config.outputs.found == 'true'
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: lighthouse-results
+          path: .lighthouseci/
+          retention-days: 14
+          if-no-files-found: ignore
+          # .lighthouseci is dotfile-prefixed; upload-artifact skips hidden
+          # files by default and silently drops the whole run's reports —
+          # rishitank-recipes hit exactly this before this workflow existed.
+          include-hidden-files: true
+
+      - name: Comment on PR
+        if: >-
+          always() && inputs.comment && steps.config.outputs.found == 'true' &&
+          github.event_name == 'pull_request'
+        uses: actions/github-script@v9.0.0
+        env:
+          STRICT: ${{ inputs.strict }}
+        with:
+          script: |
+            const fs = require('fs');
+
+            const manifestPath = '.lighthouseci/manifest.json';
+            if (!fs.existsSync(manifestPath)) {
+              core.warning('No .lighthouseci/manifest.json — lhci did not produce a report, skipping the PR comment.');
+              return;
+            }
+            const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+
+            // Only present when upload.target is temporary-public-storage.
+            // Absent (e.g. upload.target: filesystem) just means no links —
+            // the score table still renders fine without them.
+            let links = {};
+            const linksPath = '.lighthouseci/links.json';
+            if (fs.existsSync(linksPath)) {
+              try {
+                links = JSON.parse(fs.readFileSync(linksPath, 'utf8'));
+              } catch (err) {
+                core.warning(`Could not parse ${linksPath}: ${err.message}`);
+              }
+            }
+
+            const grade = (score) => {
+              if (score === null || score === undefined) return '—';
+              const pct = Math.round(score * 100);
+              const emoji = pct >= 90 ? '🟢' : pct >= 50 ? '🟠' : '🔴';
+              return `${emoji} ${pct}`;
+            };
+
+            // Multiple runs per URL when numberOfRuns > 1 — keep only the
+            // representative (median) run lhci already picked out.
+            const byUrl = new Map();
+            for (const run of manifest) {
+              if (run.isRepresentativeRun) byUrl.set(run.url, run);
+            }
+
+            const rows = [...byUrl.values()].map((run) => {
+              const s = run.summary || {};
+              const link = links[run.url];
+              const urlCell = link ? `[${run.url}](${link})` : run.url;
+              return `| ${urlCell} | ${grade(s.performance)} | ${grade(s.accessibility)} | ${grade(s['best-practices'])} | ${grade(s.seo)} |`;
+            });
+
+            if (rows.length === 0) {
+              core.warning('manifest.json had no representative runs — skipping the PR comment.');
+              return;
+            }
+
+            const strictNote = process.env.STRICT === 'true'
+              ? '_This repo’s lighthouserc assertions can fail this check._'
+              : '_Advisory: scores are reported here, not enforced yet._';
+
+            const marker = '<!-- lighthouse-ci-report -->';
+            const body = [
+              marker,
+              '### 🔦 Lighthouse CI',
+              '',
+              '| URL | Performance | Accessibility | Best Practices | SEO |',
+              '|---|---|---|---|---|',
+              ...rows,
+              '',
+              strictNote,
+            ].join('\n');
+
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            const existing = comments.find((c) => c.body && c.body.includes(marker));
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+            }

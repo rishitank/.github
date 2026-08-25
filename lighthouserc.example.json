@@ -1,0 +1,22 @@
+{
+  "//": "Starting point for lighthouse-ci.yml. Copy to lighthouserc.json at the repo root, rename to lighthouserc.js/.cjs if you need per-page or per-metric budgets, and edit the url/startServerCommand for your app. Thresholds are advisory (warn, not error) — this is the house default until you've cleared the backlog; see the shared-CI README.",
+  "ci": {
+    "collect": {
+      "startServerCommand": "npm start",
+      "startServerReadyPattern": "Ready in|started server on|- Local:",
+      "url": ["http://localhost:3000/"],
+      "numberOfRuns": 3
+    },
+    "assert": {
+      "assertions": {
+        "categories:performance": ["warn", { "minScore": 0.9 }],
+        "categories:accessibility": ["warn", { "minScore": 0.95 }],
+        "categories:best-practices": ["warn", { "minScore": 0.9 }],
+        "categories:seo": ["warn", { "minScore": 1.0 }]
+      }
+    },
+    "upload": {
+      "target": "temporary-public-storage"
+    }
+  }
+}

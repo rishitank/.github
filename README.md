@@ -51,6 +51,7 @@ needs to be insulated from that.
 | `node-ci.yml` | Node / TypeScript | npm or pnpm, single job, `.nvmrc` as the version source of truth |
 | `rust-ci.yml` | Rust | fmt, clippy `-D warnings`, test, release build, and the no-panics-in-production gate |
 | `security.yml` | any | osv-scanner + gitleaks + ecosystem audit |
+| `lighthouse-ci.yml` | Node / web frontends | `lhci autorun` against a locally built app, plus a sticky PR comment with the score table; advisory by default |
 | `lockfile.yml` | Node / TypeScript | `workflow_dispatch` lockfile regeneration that proves the result before committing |
 | `workflows-lint.yml` | any | actionlint over `.github/workflows/`, self-updating and cached |
 
@@ -60,12 +61,22 @@ the ceiling for everything it calls.
 
 ### Advisory-first inputs
 
-`python-ci.yml` takes `lint-strict`, `security.yml` takes `audit-strict`. Both
-default to `false`, so a repo that has never been linted or audited can adopt
-these today without a wall of red. They print a step summary saying so.
+`python-ci.yml` takes `lint-strict`, `security.yml` takes `audit-strict`,
+`lighthouse-ci.yml` takes `strict`. All three default to `false`, so a repo
+that has never been linted, audited, or Lighthouse-checked can adopt these
+today without a wall of red. They print a step summary (or, for Lighthouse, a
+PR comment) saying so.
 
 Leaving them `false` forever is how a quality gate becomes decoration. Clear the
 backlog, flip the flag.
+
+`lighthouse-ci.yml` doesn't set its own performance/accessibility/SEO budgets —
+those live in the consuming repo's own `lighthouserc.json` (or `.js`/`.cjs`),
+which `lhci autorun` discovers on its own. See `lighthouserc.example.json` in
+this repository for a starting point. A repo that wants "advisory on PRs,
+blocking on protected branches" rather than one fixed value can compute
+`strict` from the triggering event instead of hardcoding it:
+`strict: ${{ github.event_name != 'pull_request' }}`.
 
 ## Security tooling, and what is deliberately absent
 
