@@ -22,6 +22,18 @@ repository carries a `review-gate` ruleset that requires:
 3. Push. CodeRabbit re-reviews, and resolves threads it agrees are fixed.
 4. Repeat until CodeRabbit approves and no thread is open. Only then merge.
 
+## Commands that would defeat the gate
+
+Anyone who can comment on a PR can run these, including an agent working
+with the owner's token. They skip the loop, so agents never use them:
+
+- `@coderabbitai approve` resolves every thread and approves in one step,
+  whether or not anything was fixed.
+- `@coderabbitai resolve` marks every CodeRabbit comment resolved.
+
+If CodeRabbit is wrong about something, reply in the thread and say why. It
+resolves the thread itself when it agrees.
+
 ## Limits worth knowing
 
 - **A ruleset can't name CodeRabbit as the reviewer.** `required_reviewers`
@@ -30,6 +42,8 @@ repository carries a `review-gate` ruleset that requires:
   (Dependabot, say), the owner's approval also counts.
 - **CodeRabbit won't review bot PRs** ("bot user not eligible"), so Dependabot
   PRs need the owner's approval.
+- **The `CodeRabbit` status isn't proof of review.** It turns green when a
+  review is skipped or rate limited too. The approval is the proof.
 - **Private repositories need GitHub Pro** for rulesets. On Free, only public
   repositories can carry the gate.
 - **An admin token can still edit or delete a ruleset.** The gate stops merges,
