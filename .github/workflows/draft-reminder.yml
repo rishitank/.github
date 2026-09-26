@@ -1,0 +1,260 @@
+# Reminds the author of a pull request that has sat in draft for more than 24
+# hours to mark it ready for review, once, across every repository the owner
+# has. It never changes the pull request: no state, no labels, no reviewers.
+#
+# WHY. Agent pull requests used to be opened as drafts so that an auto-merge
+# workflow would not arm them the moment they were opened. The `review-gate`
+# ruleset has made that unnecessary: auto-merge may be armed, but nothing
+# merges until CodeRabbit approves the latest commit. A draft now only keeps a
+# pull request out of review, so a draft that is being reviewed should not be
+# one. Drafts are for work in progress that the owner asked for.
+#
+# ONE JOB, NO PER-REPO CONFIGURATION. This runs here, in .github, and searches
+# the whole owner (`github.repository_owner`) for open drafts. A repository
+# needs nothing to be covered, and a new repository is covered the day it
+# exists.
+#
+# OPTING OUT. Label the pull request `wip` (any case). It is then skipped for
+# as long as the label is on. That is for drafts that really are work in
+# progress somebody asked for.
+#
+# ONCE PER PULL REQUEST. The comment carries a hidden `<!-- draft-reminder -->`
+# marker, and a pull request that already has a comment containing it is
+# skipped, whoever posted it. Converting to ready and back does not earn a
+# second reminder.
+#
+# HOW LONG HAS IT BEEN A DRAFT? The search API has no "converted to draft at"
+# field, and `updatedAt` moves on every push and comment, so an actively
+# reviewed draft (the case this exists for) would never look old by it. So:
+# `createdAt` older than 24 hours is required first (a pull request cannot
+# have been a draft for longer than it has existed), then the draft started at
+# the latest `convert_to_draft` event on its timeline, or at `createdAt` when
+# it was opened as a draft and there is none. A timeline that cannot be read
+# means no comment: when in doubt, it stays quiet.
+#
+# TOKEN. The default GITHUB_TOKEN is scoped to this repository and cannot
+# comment anywhere else, so this uses the `PERSONAL_ADMIN_TOKEN` secret. It
+# needs the repository permission "Pull requests: read and write" on every
+# repository on the account (a fine-grained PAT with "All repositories";
+# Metadata: read comes with it). A private repository the token cannot see
+# is not searched at all, so grant it on all repositories, not a selection.
+# If the secret is missing or refused, the run prints NEEDS-TOKEN and exits 0
+# without commenting; a comment refused on one repository is reported the
+# same way and the rest carry on.
+#
+# DRY RUN. A manual run defaults to dry-run, which lists what would be
+# reminded and posts nothing. The schedule always posts.
+#
+# TIME BUDGET. Each draft costs a timeline read, and each reminder a comment
+# plus the one-second pause GitHub asks for between them, so a large backlog
+# could outrun any fixed job timeout and die before reporting. The loop stops
+# taking new drafts once BUDGET_SECONDS have passed, reports the rest as
+# deferred, and exits normally. Drafts are taken oldest first, and one
+# already reminded costs only its timeline read, so the next day's run gets
+# past them quickly and carries on where this one stopped. The job timeout
+# leaves ten minutes above the budget for the draft in flight and the report.
+#
+# Needs only `gh` and `jq`, both preinstalled on ubuntu-latest.
+name: draft-reminder
+
+on:
+  schedule:
+    # Daily, early in the UK working day, off the top of the hour.
+    - cron: "17 7 * * *"
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: List the pull requests that would be reminded without commenting.
+        type: boolean
+        default: true
+
+# A manual run overlapping the scheduled one could otherwise post twice before
+# either sees the other's marker.
+concurrency:
+  group: draft-reminder
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  remind:
+    name: Remind stale drafts
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Remind
+        env:
+          GH_TOKEN: ${{ secrets.PERSONAL_ADMIN_TOKEN }}
+          TOKEN_NAME: PERSONAL_ADMIN_TOKEN
+          OWNER: ${{ github.repository_owner }}
+          DRY_RUN: ${{ github.event_name == 'schedule' && 'false' || inputs.dry-run }}
+          # Twenty minutes, inside the 30-minute job timeout. See TIME BUDGET.
+          BUDGET_SECONDS: "1200"
+        run: |
+          set -euo pipefail
+
+          MARKER='<!-- draft-reminder -->'
+          TEXT="This PR has been a draft for more than 24 hours. If it's being reviewed, please mark it ready for review: drafts are for work in progress only, and the review gate already stops anything merging before CodeRabbit approves."
+          BODY=$(printf '%s\n%s' "${MARKER}" "${TEXT}")
+          SUMMARY="${GITHUB_STEP_SUMMARY:-/dev/null}"
+          ERR=$(mktemp)
+          GRANT="Give ${TOKEN_NAME} the repository permission \"Pull requests: read and write\" on every repository owned by ${OWNER}."
+
+          # A notice, not a failure: a missing or under-scoped token is for the
+          # owner to fix, and failing daily over it would only teach people
+          # to ignore this job.
+          needs_token() {
+            echo "::notice title=NEEDS-TOKEN::$1 ${GRANT}"
+            echo "- NEEDS-TOKEN: $1" >> "${SUMMARY}"
+          }
+
+          # A refusal (bad, missing or under-scoped token, or a repository it
+          # cannot see) as opposed to any other failure. GitHub also answers a
+          # primary or secondary rate limit with HTTP 403 (or 429). That is not
+          # the token's fault, and telling the owner to widen a correct token
+          # would send them after the wrong fix, so a rate limit is a failure.
+          refused() {
+            if grep -qiE 'rate limit|HTTP 429' "${ERR}"; then
+              return 1
+            fi
+            grep -qE 'HTTP 40[134]|Bad credentials|Resource not accessible' "${ERR}"
+          }
+
+          { echo "### Draft reminder"; echo; } >> "${SUMMARY}"
+
+          if [ -z "${GH_TOKEN:-}" ]; then
+            needs_token "The ${TOKEN_NAME} secret is not set, so nothing was checked."
+            exit 0
+          fi
+
+          now=$(date -u +%s)
+          cutoff=$((now - 86400))
+          deadline=$((now + ${BUDGET_SECONDS:-1200}))
+
+          if ! found=$(gh search prs --owner "${OWNER}" --draft --state open --archived=false \
+              --limit 1000 --json number,url,repository,createdAt,updatedAt,isDraft,labels 2>"${ERR}"); then
+            cat "${ERR}" >&2
+            if refused; then
+              needs_token "The search for draft pull requests was refused."
+              exit 0
+            fi
+            echo "::error::Searching ${OWNER} for draft pull requests failed."
+            exit 1
+          fi
+
+          echo "Owner ${OWNER}, dry-run ${DRY_RUN}, cutoff $(date -u -d "@${cutoff}" +%Y-%m-%dT%H:%M:%SZ)"
+          echo
+
+          total=0; reminded=0; wip=0; young=0; already=0; refusals=0; failed=0; deferred=0
+
+          # One compact JSON object per draft, oldest first.
+          while IFS= read -r pr; do
+            [ -n "${pr}" ] || continue
+            total=$((total + 1))
+            # Past the budget: count the rest rather than start on them.
+            if [ "$(date -u +%s)" -ge "${deadline}" ]; then
+              deferred=$((deferred + 1))
+              continue
+            fi
+            repo=$(jq -r '.repository.nameWithOwner' <<< "${pr}")
+            number=$(jq -r '.number' <<< "${pr}")
+            created=$(jq -r '.createdAt' <<< "${pr}")
+            ref="${repo}#${number}"
+
+            if jq -e 'any(.labels[]?; .name | ascii_downcase == "wip")' <<< "${pr}" > /dev/null; then
+              echo "skip wip      ${ref}"
+              wip=$((wip + 1))
+              continue
+            fi
+
+            if [ "$(jq -r '.createdAt | fromdateiso8601' <<< "${pr}")" -ge "${cutoff}" ]; then
+              echo "skip young    ${ref} (opened ${created})"
+              young=$((young + 1))
+              continue
+            fi
+
+            # Comments (for the marker) and draft conversions (for the age),
+            # one compact object per line across every page.
+            if ! events=$(gh api --paginate "repos/${repo}/issues/${number}/timeline?per_page=100" \
+                --jq '.[] | select(.event == "commented" or .event == "convert_to_draft")
+                      | {event, created_at, body: (.body // "")}' 2>"${ERR}" < /dev/null); then
+              cat "${ERR}" >&2
+              if refused; then
+                needs_token "Could not read ${ref}."
+                refusals=$((refusals + 1))
+              else
+                echo "::warning::could not read the timeline of ${ref}; not reminded"
+                failed=$((failed + 1))
+              fi
+              continue
+            fi
+
+            if jq -se --arg m "${MARKER}" 'any(.[]; .event == "commented" and (.body | contains($m)))' <<< "${events}" > /dev/null; then
+              echo "skip already  ${ref}"
+              already=$((already + 1))
+              continue
+            fi
+
+            since=$(jq -sr --arg c "${created}" \
+              '[.[] | select(.event == "convert_to_draft") | .created_at] | max // $c' <<< "${events}")
+            if [ "$(jq -rn --arg s "${since}" '$s | fromdateiso8601')" -ge "${cutoff}" ]; then
+              echo "skip young    ${ref} (draft since ${since})"
+              young=$((young + 1))
+              continue
+            fi
+
+            if [ "${DRY_RUN}" != "false" ]; then
+              echo "would remind  ${ref} (draft since ${since})"
+              reminded=$((reminded + 1))
+              continue
+            fi
+
+            if gh api -X POST "repos/${repo}/issues/${number}/comments" -f body="${BODY}" --silent 2>"${ERR}" < /dev/null; then
+              echo "reminded      ${ref} (draft since ${since})"
+              reminded=$((reminded + 1))
+              # GitHub asks for a second between content-creating requests;
+              # going faster is what trips the secondary rate limit.
+              sleep 1
+            else
+              cat "${ERR}" >&2
+              if refused; then
+                needs_token "Could not comment on ${ref}."
+                refusals=$((refusals + 1))
+              else
+                echo "::warning::could not comment on ${ref}"
+                failed=$((failed + 1))
+              fi
+            fi
+          done < <(jq -c 'map(select(.isDraft)) | sort_by(.createdAt) | .[]' <<< "${found}")
+
+          verb=reminded; [ "${DRY_RUN}" != "false" ] && verb="would be reminded"
+          echo
+          echo "${total} drafts: ${reminded} ${verb}, ${already} already reminded, ${wip} labelled wip, ${young} under 24h, ${deferred} deferred, ${refusals} refused, ${failed} failed"
+          {
+            echo "- owner: \`${OWNER}\`, dry run: \`${DRY_RUN}\`"
+            echo "- open drafts found: ${total}"
+            echo "- ${verb}: ${reminded}"
+            echo "- already reminded: ${already}"
+            echo "- labelled \`wip\`: ${wip}"
+            echo "- draft for under 24 hours: ${young}"
+            echo "- deferred to the next run (time budget): ${deferred}"
+            echo "- refused (NEEDS-TOKEN): ${refusals}"
+            echo "- failed: ${failed}"
+          } >> "${SUMMARY}"
+
+          # A refusal is a token to fix, reported above and not fatal. Anything
+          # else means drafts went unexamined, which is not a clean run.
+          if [ "${refusals}" -gt 0 ]; then
+            echo "- ${GRANT}" >> "${SUMMARY}"
+          fi
+          # Deferred is not failed: the budget worked as designed, and the
+          # next run carries on. It is still worth seeing.
+          if [ "${deferred}" -gt 0 ]; then
+            echo "::warning::${deferred} drafts were deferred to the next run by the ${BUDGET_SECONDS:-1200}s time budget."
+          fi
+          if [ "${failed}" -gt 0 ]; then
+            exit 1
+          fi
