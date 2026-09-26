@@ -45,6 +45,15 @@
 # DRY RUN. A manual run defaults to dry-run, which lists what would be
 # reminded and posts nothing. The schedule always posts.
 #
+# TIME BUDGET. Each draft costs a timeline read, and each reminder a comment
+# plus the one-second pause GitHub asks for between them, so a large backlog
+# could outrun any fixed job timeout and die before reporting. The loop stops
+# taking new drafts once BUDGET_SECONDS have passed, reports the rest as
+# deferred, and exits normally. Drafts are taken oldest first, and one
+# already reminded costs only its timeline read, so the next day's run gets
+# past them quickly and carries on where this one stopped. The job timeout
+# leaves ten minutes above the budget for the draft in flight and the report.
+#
 # Needs only `gh` and `jq`, both preinstalled on ubuntu-latest.
 name: draft-reminder
 
@@ -72,7 +81,7 @@ jobs:
   remind:
     name: Remind stale drafts
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 30
     permissions:
       contents: read
     steps:
@@ -82,6 +91,8 @@ jobs:
           TOKEN_NAME: PERSONAL_ADMIN_TOKEN
           OWNER: ${{ github.repository_owner }}
           DRY_RUN: ${{ github.event_name == 'schedule' && 'false' || inputs.dry-run }}
+          # Twenty minutes, inside the 30-minute job timeout. See TIME BUDGET.
+          BUDGET_SECONDS: "1200"
         run: |
           set -euo pipefail
 
@@ -121,6 +132,7 @@ jobs:
 
           now=$(date -u +%s)
           cutoff=$((now - 86400))
+          deadline=$((now + ${BUDGET_SECONDS:-1200}))
 
           if ! found=$(gh search prs --owner "${OWNER}" --draft --state open --archived=false \
               --limit 1000 --json number,url,repository,createdAt,updatedAt,isDraft,labels 2>"${ERR}"); then
@@ -136,12 +148,17 @@ jobs:
           echo "Owner ${OWNER}, dry-run ${DRY_RUN}, cutoff $(date -u -d "@${cutoff}" +%Y-%m-%dT%H:%M:%SZ)"
           echo
 
-          total=0; reminded=0; wip=0; young=0; already=0; refusals=0; failed=0
+          total=0; reminded=0; wip=0; young=0; already=0; refusals=0; failed=0; deferred=0
 
           # One compact JSON object per draft, oldest first.
           while IFS= read -r pr; do
             [ -n "${pr}" ] || continue
             total=$((total + 1))
+            # Past the budget: count the rest rather than start on them.
+            if [ "$(date -u +%s)" -ge "${deadline}" ]; then
+              deferred=$((deferred + 1))
+              continue
+            fi
             repo=$(jq -r '.repository.nameWithOwner' <<< "${pr}")
             number=$(jq -r '.number' <<< "${pr}")
             created=$(jq -r '.createdAt' <<< "${pr}")
@@ -215,7 +232,7 @@ jobs:
 
           verb=reminded; [ "${DRY_RUN}" != "false" ] && verb="would be reminded"
           echo
-          echo "${total} drafts: ${reminded} ${verb}, ${already} already reminded, ${wip} labelled wip, ${young} under 24h, ${refusals} refused, ${failed} failed"
+          echo "${total} drafts: ${reminded} ${verb}, ${already} already reminded, ${wip} labelled wip, ${young} under 24h, ${deferred} deferred, ${refusals} refused, ${failed} failed"
           {
             echo "- owner: \`${OWNER}\`, dry run: \`${DRY_RUN}\`"
             echo "- open drafts found: ${total}"
@@ -223,6 +240,7 @@ jobs:
             echo "- already reminded: ${already}"
             echo "- labelled \`wip\`: ${wip}"
             echo "- draft for under 24 hours: ${young}"
+            echo "- deferred to the next run (time budget): ${deferred}"
             echo "- refused (NEEDS-TOKEN): ${refusals}"
             echo "- failed: ${failed}"
           } >> "${SUMMARY}"
@@ -231,6 +249,11 @@ jobs:
           # else means drafts went unexamined, which is not a clean run.
           if [ "${refusals}" -gt 0 ]; then
             echo "- ${GRANT}" >> "${SUMMARY}"
+          fi
+          # Deferred is not failed: the budget worked as designed, and the
+          # next run carries on. It is still worth seeing.
+          if [ "${deferred}" -gt 0 ]; then
+            echo "::warning::${deferred} drafts were deferred to the next run by the ${BUDGET_SECONDS:-1200}s time budget."
           fi
           if [ "${failed}" -gt 0 ]; then
             exit 1
