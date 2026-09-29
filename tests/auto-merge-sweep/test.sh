@@ -61,7 +61,7 @@ echo "== 1. a live sweep"
 fresh_state; run false
 check "exit 0" '[ "$RC" = 0 ]'
 check "owner PR on a gated base: armed" 'armed gated/pull/1 && armed gated/pull/2'
-check "gated release/ base (slash in the name): armed" 'armed gated/pull/10'
+check "gated release/ base (slash in the name): armed, branch sent encoded" 'armed gated/pull/10 && [ "$(calls "rules/branches/release%2F2026.10")" = 1 ]'
 check "draft: not armed" '! armed gated/pull/3'
 check "stranger: not armed" '! armed gated/pull/4'
 check "someone else's branch in the owner's repo: not armed" '! armed gated/pull/11'
@@ -79,7 +79,7 @@ check "second run: nothing new armed" '[ "$RC" = 0 ] && [ "$(calls "--auto --squ
 
 echo "== 2. dry run"
 fresh_state; run true
-check "reports, writes nothing" '[ "$RC" = 0 ] && has "would arm ${U}/gated/pull/1" && [ "$(calls "pr merge")" = 0 ]'
+check "reports, writes nothing" '[ "$RC" = 0 ] && has "would arm ${U}/gated/pull/1" && has "would disarm ${U}/gated/pull/6" && [ "$(calls "pr merge")" = 0 ]'
 
 echo "== 3. rules unreadable: not armed, run continues"
 fresh_state; set_state '.rules["rishitank/gated:main"] = "error"'
@@ -96,6 +96,11 @@ jq --arg u "${U}/gated/pull/1" '.prs[$u].merge_error = "HTTP 403: Resource not a
 run false
 check "arm refused (403): NEEDS-TOKEN, exit 0, others still armed" '[ "$RC" = 0 ] && has "NEEDS-TOKEN" && armed gated/pull/2'
 
+fresh_state
+jq --arg u "${U}/gated/pull/6" '.prs[$u].disarm_error = "HTTP 403: Resource not accessible by personal access token"' "${WORK}/state.json" > "${WORK}/t" && mv "${WORK}/t" "${WORK}/state.json"
+run false
+check "disarm refused (403): NEEDS-TOKEN, not counted as disarmed, exit 0" '[ "$RC" = 0 ] && has "GitHub refused to disarm it" && ! has "disarmed ${U}/gated/pull/6" && has "disarmed 1"'
+
 echo "== 5. real failures fail the run"
 fresh_state; set_state '.deny_search = 502'; run false
 check "search 502: exit 1" '[ "$RC" = 1 ]'
@@ -103,6 +108,10 @@ fresh_state
 jq --arg u "${U}/gated/pull/1" '.prs[$u].merge_error = "GraphQL: something broke (HTTP 500)"' "${WORK}/state.json" > "${WORK}/t" && mv "${WORK}/t" "${WORK}/state.json"
 run false
 check "arm 500: exit 1, the rest still processed" '[ "$RC" = 1 ] && armed gated/pull/2'
+fresh_state
+jq --arg u "${U}/loose/pull/1" '.prs[$u].disarm_error = "GraphQL: something broke (HTTP 500)"' "${WORK}/state.json" > "${WORK}/t" && mv "${WORK}/t" "${WORK}/state.json"
+run false
+check "disarm 500: exit 1, reported, not counted, the rest still processed" '[ "$RC" = 1 ] && has "could not disarm" && ! has "disarmed ${U}/loose/pull/1" && armed gated/pull/1'
 
 echo
 echo "${pass} passed, ${fail} failed"

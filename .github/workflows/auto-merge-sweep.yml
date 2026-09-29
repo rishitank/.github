@@ -84,9 +84,17 @@ jobs:
           armed=0; disarmed=0; skipped=0; failed=0
           declare -A gate=()   # "repo<TAB>base" -> "" when gated, or why not
 
+          # $1 pull request, $2 why. Counted, and reported, only when it worked.
           disarm() {
-            if [ "${DRY_RUN}" = true ]; then return 0; fi
-            gh pr merge "$1" --disable-auto >/dev/null 2>&1 || true
+            local out
+            if [ "${DRY_RUN}" = true ]; then disarmed=$((disarmed + 1)); say "would disarm $1: $2"; return 0; fi
+            if out=$(gh pr merge "$1" --disable-auto 2>&1); then
+              disarmed=$((disarmed + 1)); say "disarmed $1: $2"
+            elif grep -qE "HTTP 40[134]|Resource not accessible|Bad credentials" <<< "${out}"; then
+              needs_token "$1: GitHub refused to disarm it: ${out}"
+            else
+              failed=$((failed + 1)); echo "::warning::$1: could not disarm: ${out}"
+            fi
           }
 
           for pr in ${prs}; do
@@ -109,14 +117,16 @@ jobs:
               skipped=$((skipped + 1)); continue
             fi
             if jq -e --arg l "${OPT_OUT}" 'any(.labels[]; .name == $l)' <<< "${meta}" >/dev/null; then
-              if [ "${is_armed}" = true ]; then disarm "${pr}"; disarmed=$((disarmed + 1)); say "disarmed ${pr}: labelled ${OPT_OUT}"; fi
+              if [ "${is_armed}" = true ]; then disarm "${pr}" "labelled ${OPT_OUT}"; fi
               skipped=$((skipped + 1)); continue
             fi
 
             # THE FENCE, once per repository and base branch.
             key="${repo}"$'\t'"${base}"
             if [ -z "${gate[${key}]+set}" ]; then
-              if ! rules=$(gh api "repos/${repo}/rules/branches/${base}?per_page=100" 2>&1); then
+              # A branch name is one path segment: release/1.0 goes as release%2F1.0.
+              enc=$(jq -rn --arg b "${base}" '$b | @uri')
+              if ! rules=$(gh api "repos/${repo}/rules/branches/${enc}?per_page=100" 2>&1); then
                 gate[${key}]="could not read the rules on ${base}"
                 echo "::warning::${repo}: could not read the rules on ${base}: ${rules}"
               else
@@ -131,7 +141,7 @@ jobs:
               fi
             fi
             if [ -n "${gate[${key}]}" ]; then
-              if [ "${is_armed}" = true ]; then disarm "${pr}"; disarmed=$((disarmed + 1)); say "disarmed ${pr}: ${gate[${key}]}"; fi
+              if [ "${is_armed}" = true ]; then disarm "${pr}" "${gate[${key}]}"; fi
               skipped=$((skipped + 1)); continue
             fi
 

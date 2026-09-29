@@ -4,11 +4,12 @@
 State shape:
   deny_search: 401|502|null
   prs: {url: {state, isDraft, author: {login, is_bot}, headRepositoryOwner: {login},
-              baseRefName, labels: [{name}], armed: bool, merge_error: "text"|null}}
+              baseRefName, labels: [{name}], armed: bool,
+              merge_error: "text"|null (arming fails), disarm_error: "text"|null}}
   rules: {"owner/repo:branch": [rule, ...] | "error"}
 Every call is appended to $MOCK_STATE.log, one line per call.
 """
-import json, os, subprocess, sys
+import json, os, subprocess, sys, urllib.parse
 
 a = sys.argv[1:]
 st = json.load(open(os.environ["MOCK_STATE"]))
@@ -56,6 +57,7 @@ if a[:2] == ["pr", "view"]:
 if a[:2] == ["pr", "merge"]:
     pr = st["prs"][a[2]]
     if "--disable-auto" in a:
+        if pr.get("disarm_error"): err(pr["disarm_error"])
         pr["armed"] = False; save(); sys.exit(0)
     assert "--auto" in a and "--squash" in a, a
     if pr.get("merge_error"): err(pr["merge_error"])
@@ -64,7 +66,9 @@ if a[:2] == ["pr", "merge"]:
 if a[0] == "api":
     path = a[1].split("?")[0]
     parts = path.split("/")
-    key = "/".join(parts[1:3]) + ":" + "/".join(parts[5:])
+    # The branch must arrive as one encoded segment, as GitHub expects it.
+    assert len(parts) == 6, f"branch not encoded: {path}"
+    key = "/".join(parts[1:3]) + ":" + urllib.parse.unquote(parts[5])
     rules = st["rules"].get(key, [])
     if rules == "error": err("gh: Server Error (HTTP 500)")
     out(rules)
