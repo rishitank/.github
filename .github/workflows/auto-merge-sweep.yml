@@ -1,0 +1,151 @@
+# Auto-merge for the owner's pull requests on every public repository, with
+# no file in any of them.
+#
+# A personal account has no organisation rulesets, so GitHub can't be told to
+# run a workflow on every repository's pull requests. Instead this runs here,
+# on a schedule, finds the owner's open pull requests across the account's
+# public repositories, and turns on auto-merge for the ones whose base branch
+# is properly gated. A repository created tomorrow is covered by the next run.
+#
+# ARMED ONLY BEHIND A GATE. For each pull request it reads the rules that
+# actually apply to the base branch (every ruleset, whatever its name). It
+# arms `gh pr merge --auto --squash` only if they require an approval AND a
+# status check other than CodeRabbit's, i.e. the repository's CI. Anything
+# less, and auto-merge would merge on a review alone, so it disarms instead.
+# GitHub then merges by itself once every rule is met: CodeRabbit's approval
+# of the latest commit, threads resolved, checks green.
+#
+# ONLY THE OWNER'S PULL REQUESTS. These repositories are public, so anyone can
+# open one. A stranger's pull request is never armed, and neither is a bot's
+# (Renovate merges its own), a draft, or one labelled `needs-human-review`.
+# A label added after arming is honoured on the next run: it disarms.
+#
+# TOKEN. `PERSONAL_ADMIN_TOKEN` (Pull requests and Contents: read and write,
+# All repositories). The merge is then made as the owner, so `on: push`
+# workflows fire after it, and the review gate still applies: it has no
+# bypass for the owner. Without the secret, or when GitHub refuses it, the run
+# says NEEDS-TOKEN and changes nothing.
+name: auto-merge-sweep
+
+on:
+  schedule:
+    # Every 20 minutes. Arming is idempotent, so a run that overlaps the next
+    # is harmless; the concurrency group below queues it anyway.
+    - cron: "7,27,47 * * * *"
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: Report what would be armed or disarmed without doing it.
+        type: boolean
+        default: true
+
+permissions: {}
+
+concurrency:
+  group: auto-merge-sweep
+  cancel-in-progress: false
+
+jobs:
+  sweep:
+    name: Arm gated pull requests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions: {}
+    steps:
+      - name: Sweep
+        env:
+          GH_TOKEN: ${{ secrets.PERSONAL_ADMIN_TOKEN }}
+          OWNER: ${{ github.repository_owner }}
+          DRY_RUN: ${{ github.event_name == 'schedule' && 'false' || inputs.dry-run }}
+          OPT_OUT: needs-human-review
+        run: |
+          set -uo pipefail
+
+          say() { echo "$1"; echo "- $1" >> "${GITHUB_STEP_SUMMARY}"; }
+          needs_token() {
+            echo "::warning title=NEEDS-TOKEN::$1 Add or fix the PERSONAL_ADMIN_TOKEN secret: Pull requests and Contents (read and write) on All repositories. Nothing was armed."
+            echo "NEEDS-TOKEN: $1" >> "${GITHUB_STEP_SUMMARY}"
+          }
+          if [ -z "${GH_TOKEN}" ]; then needs_token "PERSONAL_ADMIN_TOKEN is not set."; exit 0; fi
+
+          # Every open pull request in the owner's public repositories. Drafts,
+          # authors and labels are judged from `gh pr view` below, which is
+          # authoritative; the search only finds candidates.
+          if ! prs=$(gh search prs --owner "${OWNER}" --state open --visibility public \
+              --archived=false --limit 500 --json url --jq '.[].url' 2>&1); then
+            if grep -qE "HTTP 40[134]|Bad credentials" <<< "${prs}"; then
+              needs_token "GitHub refused the search: ${prs}"
+              exit 0
+            fi
+            echo "::error::search failed: ${prs}"
+            exit 1
+          fi
+
+          armed=0; disarmed=0; skipped=0; failed=0
+          declare -A gate=()   # "repo<TAB>base" -> "" when gated, or why not
+
+          disarm() {
+            if [ "${DRY_RUN}" = true ]; then return 0; fi
+            gh pr merge "$1" --disable-auto >/dev/null 2>&1 || true
+          }
+
+          for pr in ${prs}; do
+            if ! meta=$(gh pr view "${pr}" --json baseRefName,isDraft,state,author,labels,autoMergeRequest,headRepositoryOwner 2>&1); then
+              failed=$((failed + 1)); echo "::warning::${pr}: could not read: ${meta}"; continue
+            fi
+            repo=$(sed -E 's#https://github.com/([^/]+/[^/]+)/pull/.*#\1#' <<< "${pr}")
+            base=$(jq -r .baseRefName <<< "${meta}")
+            author=$(jq -r '.author.login' <<< "${meta}")
+            is_bot=$(jq -r '(.author.is_bot // false) or (.author.login | test("\\[bot\\]$|^app/"))' <<< "${meta}")
+            fork_owner=$(jq -r '.headRepositoryOwner.login // ""' <<< "${meta}")
+            is_armed=$(jq -r '.autoMergeRequest != null' <<< "${meta}")
+
+            if [ "$(jq -r .state <<< "${meta}")" != OPEN ] || [ "$(jq -r .isDraft <<< "${meta}")" = true ]; then
+              skipped=$((skipped + 1)); continue
+            fi
+            if [ "${is_bot}" = true ] || [ "${author}" != "${OWNER}" ] || [ "${fork_owner}" != "${OWNER}" ]; then
+              # Not the owner's own branch: never armed here. If someone armed
+              # it by hand, that is their decision, and it is left alone.
+              skipped=$((skipped + 1)); continue
+            fi
+            if jq -e --arg l "${OPT_OUT}" 'any(.labels[]; .name == $l)' <<< "${meta}" >/dev/null; then
+              if [ "${is_armed}" = true ]; then disarm "${pr}"; disarmed=$((disarmed + 1)); say "disarmed ${pr}: labelled ${OPT_OUT}"; fi
+              skipped=$((skipped + 1)); continue
+            fi
+
+            # THE FENCE, once per repository and base branch.
+            key="${repo}"$'\t'"${base}"
+            if [ -z "${gate[${key}]+set}" ]; then
+              if ! rules=$(gh api "repos/${repo}/rules/branches/${base}?per_page=100" 2>&1); then
+                gate[${key}]="could not read the rules on ${base}"
+                echo "::warning::${repo}: could not read the rules on ${base}: ${rules}"
+              else
+                approvals=$(jq '[.[] | select(.type == "pull_request") | .parameters.required_approving_review_count] | max // 0' <<< "${rules}")
+                ci=$(jq -r '[.[] | select(.type == "required_status_checks") | .parameters.required_status_checks[].context
+                            | select(. != "CodeRabbit")] | unique | join(", ")' <<< "${rules}")
+                if [ "${approvals:-0}" -ge 1 ] && [ -n "${ci}" ]; then
+                  gate[${key}]=""
+                else
+                  gate[${key}]="${base} requires ${approvals:-0} approval(s) and CI checks: ${ci:-none}"
+                fi
+              fi
+            fi
+            if [ -n "${gate[${key}]}" ]; then
+              if [ "${is_armed}" = true ]; then disarm "${pr}"; disarmed=$((disarmed + 1)); say "disarmed ${pr}: ${gate[${key}]}"; fi
+              skipped=$((skipped + 1)); continue
+            fi
+
+            if [ "${is_armed}" = true ]; then skipped=$((skipped + 1)); continue; fi
+            if [ "${DRY_RUN}" = true ]; then say "would arm ${pr}"; armed=$((armed + 1)); continue; fi
+            if out=$(gh pr merge "${pr}" --auto --squash 2>&1); then
+              armed=$((armed + 1)); say "armed ${pr}"
+            elif grep -qE "HTTP 40[134]|Resource not accessible|Bad credentials" <<< "${out}"; then
+              needs_token "${pr}: GitHub refused to arm it: ${out}"
+            else
+              failed=$((failed + 1)); echo "::warning::${pr}: could not arm: ${out}"
+            fi
+          done
+
+          echo "armed ${armed}, disarmed ${disarmed}, skipped ${skipped}, failed ${failed} (dry run: ${DRY_RUN})"
+          echo "armed ${armed}, disarmed ${disarmed}, skipped ${skipped}, failed ${failed} (dry run: ${DRY_RUN})" >> "${GITHUB_STEP_SUMMARY}"
+          [ "${failed}" -eq 0 ]

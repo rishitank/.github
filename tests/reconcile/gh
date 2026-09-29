@@ -1,0 +1,125 @@
+#!/usr/bin/env python3
+"""Mock of `gh api` for testing repo-settings-reconcile.yml. State lives in $MOCK_STATE.
+
+State shape:
+  deny_list: 401|500|null          (GET user/repos)
+  drop_bypass: bool                (a ruleset write "succeeds" but loses its bypass)
+  repos: {full_name: {
+      private, archived, fork, owner, default_branch,
+      settings: {...}, drop_settings: [keys GitHub silently ignores],
+      rulesets: {id: body},
+      workflows: {path: yaml text} | null (listing fails with 500),
+      deny_rulesets: 403|500|null  (writes to rulesets refused)
+  }}
+Every call is appended to $MOCK_STATE.log as "METHOD path".
+"""
+import base64, json, os, subprocess, sys
+
+args = sys.argv[1:]
+assert args[0] == "api", args
+args = args[1:]
+method, jqf, silent, paginate, path = "GET", None, False, False, None
+i = 0
+while i < len(args):
+    a = args[i]
+    if a == "-X": method = args[i + 1]; i += 2; continue
+    if a == "--jq": jqf = args[i + 1]; i += 2; continue
+    if a == "--input": i += 2; continue
+    if a == "--silent": silent = True; i += 1; continue
+    if a == "--paginate": paginate = True; i += 1; continue
+    path = a; i += 1
+
+st = json.load(open(os.environ["MOCK_STATE"]))
+with open(os.environ["MOCK_STATE"] + ".log", "a") as log:
+    log.write(f"{method} {path}\n")
+
+
+def out(obj):
+    s = json.dumps(obj)
+    if jqf:
+        s = subprocess.run(["jq", "-r", jqf], input=s, capture_output=True, text=True, check=True).stdout.rstrip("\n")
+    if not silent:
+        print(s)
+    sys.exit(0)
+
+
+def err(msg):
+    print(f"gh: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def save():
+    json.dump(st, open(os.environ["MOCK_STATE"], "w"))
+
+
+def github_defaults(body):
+    # GitHub adds defaults of its own; mimic them so the matcher is tested honestly.
+    for rule in body.get("rules", []):
+        if rule["type"] == "pull_request":
+            rule["parameters"].setdefault("required_reviewers", [])
+            rule["parameters"].setdefault("automatic_copilot_code_review_enabled", False)
+        if rule["type"] == "required_status_checks":
+            rule["parameters"].setdefault("do_not_enforce_on_create", False)
+
+
+query = path.split("?")[1] if "?" in path else ""
+params = dict(kv.split("=", 1) for kv in query.split("&") if "=" in kv)
+p = path.split("?")[0].split("/")
+
+if p[0] == "apps":
+    ids = {"renovate": 2740, "coderabbitai": 347564, "github-actions": 15368}
+    out({"id": ids[p[1]]}) if p[1] in ids else err("Not Found (HTTP 404)")
+
+if p[:2] == ["user", "repos"]:
+    if st.get("deny_list") == 401: err("Bad credentials (HTTP 401)")
+    if st.get("deny_list") == 500: err("Server Error (HTTP 500)")
+    lst = [{"full_name": n, "owner": {"login": r.get("owner", "rishitank")}, "archived": r.get("archived", False),
+            "fork": r.get("fork", False), "default_branch": r.get("default_branch", "main"),
+            "visibility": "private" if r.get("private") else "public"}
+           for n, r in st["repos"].items()]
+    if params.get("visibility") == "public":
+        lst = [x for x in lst if x["visibility"] == "public"]
+    out(lst)
+
+repo = "/".join(p[1:3])
+if p[0] != "repos" or repo not in st["repos"]:
+    err("Not Found (HTTP 404)")
+r = st["repos"][repo]
+
+if len(p) == 3:
+    if method == "PATCH":
+        body = json.load(sys.stdin)
+        for k, v in body.items():
+            if k not in r.get("drop_settings", []):
+                r["settings"][k] = v
+        save(); out({})
+    out(r["settings"])
+
+if p[3] == "contents":
+    wf = r.get("workflows", {})
+    if wf is None: err("Server Error (HTTP 500)")
+    want = "/".join(p[4:])
+    if want == ".github/workflows":
+        if not wf: err("Not Found (HTTP 404)")
+        out([{"type": "file", "name": f.split("/")[-1], "path": f} for f in wf])
+    if want in wf:
+        out({"content": base64.b64encode(wf[want].encode()).decode()})
+    err("Not Found (HTTP 404)")
+
+if p[3] == "rulesets":
+    rs = r["rulesets"]
+    if len(p) == 4 and method == "GET":
+        out([{"id": int(k), "name": v["name"], "source_type": "Repository", "source": repo} for k, v in rs.items()])
+    if method in ("POST", "PUT"):
+        if r.get("deny_rulesets") == 403: err("Resource not accessible by personal access token (HTTP 403)")
+        if r.get("deny_rulesets") == 500: err("Server Error (HTTP 500)")
+        body = json.load(sys.stdin)
+        rid = p[4] if len(p) == 5 else str(9000 + sum(len(x["rulesets"]) for x in st["repos"].values()))
+        github_defaults(body)
+        if st.get("drop_bypass"): body["bypass_actors"] = []
+        body.update({"id": int(rid), "source_type": "Repository", "source": repo})
+        rs[rid] = body; save(); out(body)
+    if method == "GET":
+        if p[4] not in rs: err("Not Found (HTTP 404)")
+        out(rs[p[4]])
+err(f"unhandled {method} {path}")

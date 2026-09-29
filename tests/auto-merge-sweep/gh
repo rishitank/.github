@@ -1,0 +1,72 @@
+#!/usr/bin/env python3
+"""Mock of `gh` for testing auto-merge-sweep.yml. State lives in $MOCK_STATE.
+
+State shape:
+  deny_search: 401|502|null
+  prs: {url: {state, isDraft, author: {login, is_bot}, headRepositoryOwner: {login},
+              baseRefName, labels: [{name}], armed: bool, merge_error: "text"|null}}
+  rules: {"owner/repo:branch": [rule, ...] | "error"}
+Every call is appended to $MOCK_STATE.log, one line per call.
+"""
+import json, os, subprocess, sys
+
+a = sys.argv[1:]
+st = json.load(open(os.environ["MOCK_STATE"]))
+with open(os.environ["MOCK_STATE"] + ".log", "a") as log:
+    log.write(" ".join(a) + "\n")
+
+
+def flag(name):
+    return a[a.index(name) + 1] if name in a else None
+
+
+def out(obj):
+    s = json.dumps(obj)
+    jq = flag("--jq")
+    if jq:
+        s = subprocess.run(["jq", "-r", jq], input=s, capture_output=True, text=True, check=True).stdout.rstrip("\n")
+    print(s)
+    sys.exit(0)
+
+
+def err(msg):
+    print(msg, file=sys.stderr)
+    sys.exit(1)
+
+
+def save():
+    json.dump(st, open(os.environ["MOCK_STATE"], "w"))
+
+
+if a[:2] == ["search", "prs"]:
+    # The flags the workflow relies on, asserted rather than assumed.
+    assert flag("--owner") == "rishitank" and flag("--state") == "open" and flag("--visibility") == "public", a
+    assert "--archived=false" in a, a
+    if st.get("deny_search") == 401: err("HTTP 401: Bad credentials")
+    if st.get("deny_search") == 502: err("HTTP 502: Bad Gateway")
+    out([{"url": u} for u in st["prs"]])
+
+if a[:2] == ["pr", "view"]:
+    pr = st["prs"].get(a[2])
+    if pr is None: err("GraphQL: Could not resolve to a PullRequest")
+    view = {k: pr[k] for k in ("state", "isDraft", "author", "headRepositoryOwner", "baseRefName", "labels")}
+    view["autoMergeRequest"] = {"enabledAt": "x"} if pr.get("armed") else None
+    out(view)
+
+if a[:2] == ["pr", "merge"]:
+    pr = st["prs"][a[2]]
+    if "--disable-auto" in a:
+        pr["armed"] = False; save(); sys.exit(0)
+    assert "--auto" in a and "--squash" in a, a
+    if pr.get("merge_error"): err(pr["merge_error"])
+    pr["armed"] = True; save(); sys.exit(0)
+
+if a[0] == "api":
+    path = a[1].split("?")[0]
+    parts = path.split("/")
+    key = "/".join(parts[1:3]) + ":" + "/".join(parts[5:])
+    rules = st["rules"].get(key, [])
+    if rules == "error": err("gh: Server Error (HTTP 500)")
+    out(rules)
+
+err(f"unhandled: {a}")

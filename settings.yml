@@ -1,0 +1,104 @@
+# This account's repository policy, in one reviewable place.
+#
+# Applied by .github/workflows/repo-settings-reconcile.yml -- on a push to
+# this file, nightly, and on demand -- to every PUBLIC, non-archived
+# repository this account owns. Forks are left alone: their settings belong
+# to the upstream they track. No repository is named here, so a new public
+# repository is covered by the next run with nothing to add.
+#
+# WHY PUBLIC ONLY. A personal account on the Free plan gets auto-merge and
+# rulesets on public repositories only; on a private one GitHub accepts the
+# write and silently drops it (auto-merge), or refuses it (rulesets). The
+# private repositories here are left exactly as they are.
+#
+# WHY PER REPOSITORY. A personal account has no organisation rulesets, so the
+# same ruleset body is written into each repository. It is still one body,
+# kept here, never a per-repository list.
+
+repository:
+  # auto-merge-sweep.yml turns auto-merge on for the owner's pull requests;
+  # without allow_auto_merge GitHub refuses, and --squash needs squash merges.
+  allow_auto_merge: true
+  allow_squash_merge: true
+  # A merged pull request's head branch is deleted. GitHub never deletes the
+  # default branch this way, and `long-lived-branches` below stops it
+  # deleting develop, master or a release branch either.
+  delete_branch_on_merge: true
+
+repo_rulesets:
+  # Keys, per ruleset (the same shape as TanksterAI/.github's org_rulesets,
+  # minus `repositories`, since each is written into one repository):
+  # - enforcement: active | disabled | when_published. `when_published` is
+  #   active on a repository whose default-branch workflows have a job
+  #   named after the ruleset's one required check, and disabled elsewhere.
+  # - branches: the `include` list. `exclude` is always empty, and an
+  #   exclusion added by hand is repaired.
+  # - bypass_apps: GitHub App slugs, resolved to IDs at run time, that may
+  #   merge their own pull requests past the ruleset (`pull_request` mode).
+  # - pull_request: the pull_request rule's parameters.
+  # - required_checks: `strict` and `checks`, each a check name plus the app
+  #   slug that must post it.
+  # - block_force_push / block_deletion.
+  #
+  # A repository ruleset with any other name is never touched, so the
+  # rulesets already on a repository (holocron's "Main Branch Protection",
+  # with its CI checks) stay as they are, and keep applying alongside these.
+
+  review-gate:
+    # Nothing reaches a default branch without CodeRabbit's approval of the
+    # latest commit, every conversation resolved, and CodeRabbit's check
+    # green. The same body as the TanksterAI org ruleset of this name, and
+    # it replaces the copies put on by hand on 2026-09-25 (same name, so the
+    # reconciler updates those in place rather than adding a second).
+    enforcement: active
+    branches: ["~DEFAULT_BRANCH"]
+    # Renovate merges its own pull requests past the gate, because CodeRabbit
+    # never reviews a bot's. Nobody else, admins included.
+    bypass_apps: [renovate]
+    pull_request:
+      # Never 0: the CodeRabbit check goes green even when a review is
+      # skipped or rate-limited, so the approval is the only proof of review.
+      required_approving_review_count: 1
+      dismiss_stale_reviews_on_push: true
+      required_review_thread_resolution: true
+      require_code_owner_review: false
+      require_last_push_approval: false
+      allowed_merge_methods: [squash]
+    required_checks:
+      strict: true
+      checks:
+        - context: CodeRabbit
+          app: coderabbitai
+    block_force_push: true
+    block_deletion: true
+
+  ci-gate:
+    # GREEN CI, without this file knowing any repository's job names. A
+    # repository opts in by publishing ONE check, `ci-gate`, from a top-level
+    # job in a workflow on its default branch (the contract and the job to
+    # copy are in the README). The reconciler looks for that job in every
+    # repository, every run: where it exists this ruleset is written active,
+    # and where it doesn't, disabled. So a repository is never blocked on a
+    # check it doesn't publish, and one that starts publishing it is gated
+    # from the next run on, with no edit here.
+    enforcement: when_published
+    branches: ["~DEFAULT_BRANCH"]
+    required_checks:
+      strict: true
+      checks:
+        # Pinned to GitHub Actions, so only a workflow run can satisfy it.
+        - context: ci-gate
+          app: github-actions
+
+  long-lived-branches:
+    # delete_branch_on_merge deletes a merged pull request's head branch, so
+    # a pull request from develop into main would take develop with it. These
+    # names can't be deleted at all, by hand or by any tool.
+    # `release/**/*` matches every branch under release/, at any depth.
+    enforcement: active
+    branches:
+      - refs/heads/main
+      - refs/heads/master
+      - refs/heads/develop
+      - refs/heads/release/**/*
+    block_deletion: true

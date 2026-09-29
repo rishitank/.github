@@ -1,0 +1,309 @@
+# This account's public repositories, reconciled to ../../settings.yml.
+#
+# The policy lives in settings.yml; this file is only the runner. It covers
+# every PUBLIC, non-archived, non-fork repository the account owns, found
+# fresh on every run, so a repository created tomorrow is covered by the next
+# run without anyone adding it anywhere.
+#
+# WHAT IT WRITES, per repository:
+# - the `repository:` settings (auto-merge, squash, delete branch on merge),
+#   only the keys that differ, then read back, because GitHub answers 2xx and
+#   silently drops a setting the plan doesn't allow;
+# - each ruleset under `repo_rulesets:`, created if missing and updated if it
+#   differs, then read back. A repository ruleset with any other name is
+#   never touched.
+#
+# TOKEN. `PERSONAL_ADMIN_TOKEN`: a fine-grained personal access token for
+# "All repositories" with Administration (read and write) and Contents
+# (read). The default GITHUB_TOKEN can't write to other repositories. Without
+# the secret, or when GitHub refuses it, the run says NEEDS-TOKEN and changes
+# nothing, rather than failing every night.
+name: repo-settings-reconcile
+
+on:
+  # A merge to the policy is the decision to apply it.
+  push:
+    branches: [main]
+    paths:
+      - settings.yml
+  # Nightly, for what no event here can see: a new repository, or a setting
+  # changed by hand in the UI.
+  schedule:
+    - cron: "23 4 * * *"
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: Report the differences without writing anything.
+        type: boolean
+        default: true
+
+permissions: {}
+
+concurrency:
+  group: repo-settings-reconcile
+  cancel-in-progress: false
+
+jobs:
+  reconcile:
+    name: Reconcile repository policy
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: Reconcile
+        env:
+          GH_TOKEN: ${{ secrets.PERSONAL_ADMIN_TOKEN }}
+          OWNER: ${{ github.repository_owner }}
+          # Scheduled runs and a push to settings.yml apply. A hand-run
+          # defaults to reporting, so nobody finds out the blast radius by
+          # causing it.
+          DRY_RUN: ${{ (github.event_name == 'schedule' || github.event_name == 'push') && 'false' || inputs.dry-run }}
+        run: |
+          set -euo pipefail
+          POLICY=settings.yml
+
+          needs_token() {
+            echo "::warning title=NEEDS-TOKEN::$1 Add or fix the PERSONAL_ADMIN_TOKEN secret: a fine-grained token for All repositories with Administration (read and write) and Contents (read). Nothing was changed."
+            echo "NEEDS-TOKEN: $1" >> "${GITHUB_STEP_SUMMARY}"
+          }
+          if [ -z "${GH_TOKEN}" ]; then
+            needs_token "PERSONAL_ADMIN_TOKEN is not set."
+            exit 0
+          fi
+          command -v yq >/dev/null || { echo "::error::yq not found on runner"; exit 1; }
+
+          DESIRED=$(yq -o=json '.repository // {}' "${POLICY}")
+          KEYS=$(echo "${DESIRED}" | jq -r 'keys | join(",")')
+          RULESETS=$(yq -o=json '.repo_rulesets // {}' "${POLICY}")
+
+          # A malformed entry stops the run before anything is written.
+          bad=$(echo "${RULESETS}" | jq -r 'to_entries[]
+            | select((.value.enforcement | IN("active", "disabled", "when_published") | not)
+                or ((.value.branches // []) | length) == 0
+                or (.value.enforcement == "when_published" and ((.value.required_checks.checks // []) | length) != 1))
+            | .key')
+          if [ -n "${bad}" ]; then
+            echo "::error::repo_rulesets entries need enforcement (active|disabled|when_published, the last with exactly one required check) and branches: ${bad//$'\n'/, }"
+            exit 1
+          fi
+
+          # App slugs become numeric IDs once, here. One that doesn't resolve
+          # stops the run: a check pinned to the wrong app blocks every merge.
+          slugs=$(echo "${RULESETS}" | jq -r \
+            '[.[] | (.bypass_apps // [])[], ((.required_checks.checks // [])[] | .app // "github-actions")] | unique | .[]')
+          APP_IDS='{}'
+          for slug in ${slugs}; do
+            id=$(gh api "apps/${slug}" --jq .id) || { echo "::error::cannot resolve GitHub App '${slug}'"; exit 1; }
+            APP_IDS=$(echo "${APP_IDS}" | jq --arg s "${slug}" --argjson i "${id}" '. + {($s): $i}')
+          done
+
+          echo "Reconciling ${OWNER}'s public repositories (event: ${GITHUB_EVENT_NAME}, dry-run: ${DRY_RUN})"
+          echo "settings: $(echo "${DESIRED}" | jq -c .) | rulesets: $(echo "${RULESETS}" | jq -r 'keys | join(", ")')"
+          echo
+
+          # Every public, non-archived, non-fork repository the owner has.
+          if ! repos=$(gh api --paginate "user/repos?affiliation=owner&visibility=public&per_page=100" \
+              --jq ".[] | select(.owner.login == \"${OWNER}\" and (.archived | not) and (.fork | not)) | [.full_name, .default_branch] | @tsv" 2>&1); then
+            if grep -qE "HTTP 40[134]|Bad credentials" <<< "${repos}"; then
+              needs_token "GitHub refused to list the repositories: ${repos}"
+              exit 0
+            fi
+            echo "::error::could not list repositories: ${repos}"
+            exit 1
+          fi
+          if [ -z "${repos}" ]; then
+            echo "::error::No repositories returned. Refusing to report success over an empty list."
+            exit 1
+          fi
+
+          # One ruleset from the policy, in the shape the repository rulesets
+          # API takes. $3 is the enforcement to write, already resolved.
+          build_ruleset() {
+            jq -n --arg name "$1" --argjson p "$2" --arg enf "$3" --argjson apps "${APP_IDS}" '
+              [ ($p.required_checks.checks // [])[]
+                | {context, integration_id: $apps[.app // "github-actions"]} ] as $checks
+              | {
+                  name: $name,
+                  target: "branch",
+                  enforcement: $enf,
+                  conditions: {ref_name: {include: $p.branches, exclude: []}},
+                  bypass_actors: [ ($p.bypass_apps // [])[]
+                    | {actor_id: $apps[.], actor_type: "Integration", bypass_mode: "pull_request"} ],
+                  rules: (
+                      (if $p.pull_request then [{type: "pull_request", parameters: $p.pull_request}] else [] end)
+                    + (if ($checks | length) > 0 then [{type: "required_status_checks", parameters: {
+                          strict_required_status_checks_policy: ($p.required_checks.strict // false),
+                          required_status_checks: $checks}}] else [] end)
+                    + (if $p.block_force_push then [{type: "non_fast_forward"}] else [] end)
+                    + (if $p.block_deletion then [{type: "deletion"}] else [] end))
+                }'
+          }
+
+          # Does what GitHub holds ($2) enforce everything the policy asks
+          # ($1)? Only the fields the policy sets are compared, since GitHub
+          # adds defaults of its own; conditions are compared in full.
+          ruleset_matches() {
+            jq -n --argjson want "$1" --argjson have "$2" '
+              def checks: map({context, integration_id}) | sort_by(.context, .integration_id);
+              def actors: map({actor_id, actor_type, bypass_mode}) | sort_by(.actor_id);
+              def rule_ok($rules):
+                . as $w
+                | ($rules | map(select(.type == $w.type)) | first) as $h
+                | $h != null
+                  and (($w.parameters // {}) | to_entries | all(
+                        .key as $k | .value as $v | ($h.parameters // {})[$k] as $hv
+                        | if $k == "required_status_checks" then ($v | checks) == (($hv // []) | checks)
+                          elif ($v | type) == "array" then ($v | sort) == (($hv // []) | sort)
+                          else $v == $hv end));
+              $want.enforcement == $have.enforcement
+              and $want.target == $have.target
+              and (($have.conditions // {}) | with_entries(select(.value != null)) | keys) == ["ref_name"]
+              and ($want.conditions.ref_name.include | sort) == (($have.conditions.ref_name.include // []) | sort)
+              and (($have.conditions.ref_name.exclude // []) | length) == 0
+              and ($want.bypass_actors | actors) == (($have.bypass_actors // []) | actors)
+              and ($want.rules | map(.type) | sort) == (($have.rules // []) | map(.type) | sort)
+              and ($want.rules | all(rule_ok($have.rules // [])))'
+          }
+
+          # Does a workflow on the default branch have a top-level job whose
+          # check is named $3 (the job's `name:`, or its id when unnamed)?
+          # Prints yes, no, or unknown when the files can't be read.
+          publishes() {
+            local repo=$1 ref=$2 check=$3 files f body
+            if ! files=$(gh api "repos/${repo}/contents/.github/workflows?ref=${ref}" \
+                --jq '.[] | select(.type == "file" and (.name | test("\\.ya?ml$"))) | .path' 2>&1); then
+              if grep -q "HTTP 404" <<< "${files}"; then echo no; else echo unknown; fi
+              return 0
+            fi
+            for f in ${files}; do
+              body=$(gh api "repos/${repo}/contents/${f}?ref=${ref}" --jq .content 2>/dev/null | base64 -d 2>/dev/null) || { echo unknown; return 0; }
+              if CHECK="${check}" yq -e '[.jobs // {} | to_entries[] | select((.value.name // .key) == env(CHECK))] | length > 0' \
+                  <<< "${body}" >/dev/null 2>&1; then
+                echo yes; return 0
+              fi
+            done
+            echo no
+          }
+
+          total=0; changed=0; failed=0; blocked=0
+
+          # A refusal from GitHub for repository $1, call $2, gh output $3. A
+          # token that can't write is reported, not failed; anything else is.
+          refused() {
+            if grep -qE "HTTP 40[134]|Bad credentials|Resource not accessible" <<< "$3"; then
+              blocked=$((blocked + 1))
+              echo "::warning title=NEEDS-TOKEN::${1}: GitHub refused ${2}. PERSONAL_ADMIN_TOKEN needs Administration (read and write) on all repositories."
+            else
+              failed=$((failed + 1))
+              echo "::warning::${1}: could not ${2}: ${3}"
+            fi
+          }
+
+          while IFS=$'\t' read -r repo branch; do
+            total=$((total + 1))
+            note=""
+
+            # --- settings --------------------------------------------------
+            if ! current=$(gh api "repos/${repo}" --jq "{${KEYS}}" 2>&1); then
+              refused "${repo}" "read settings" "${current}"
+              echo "blocked   ${repo}"
+              continue
+            fi
+            diff=$(jq -n --argjson cur "${current}" --argjson want "${DESIRED}" \
+              '$want | with_entries(select(.value != $cur[.key]))')
+            if [ "${diff}" != "{}" ]; then
+              note="settings:$(echo "${diff}" | jq -c .)"
+              if [ "${DRY_RUN}" != "true" ]; then
+                if out=$(echo "${diff}" | gh api -X PATCH "repos/${repo}" --input - 2>&1); then
+                  after=$(gh api "repos/${repo}" --jq "{${KEYS}}")
+                  stuck=$(jq -rn --argjson cur "${after}" --argjson want "${DESIRED}" \
+                    '$want | with_entries(select(.value != $cur[.key])) | keys | join(",")')
+                  if [ -n "${stuck}" ]; then
+                    note="${note} NOT-APPLIED:${stuck}"
+                    failed=$((failed + 1))
+                  fi
+                else
+                  refused "${repo}" "update settings" "${out}"
+                fi
+              fi
+            fi
+
+            # --- rulesets --------------------------------------------------
+            if ! list=$(gh api "repos/${repo}/rulesets?includes_parents=false&per_page=100" 2>&1); then
+              refused "${repo}" "list rulesets" "${list}"
+              echo "drift     ${repo}: ${note# } rulesets:unreadable"
+              changed=$((changed + 1))
+              continue
+            fi
+            for rs in $(echo "${RULESETS}" | jq -r 'keys[]'); do
+              pol=$(echo "${RULESETS}" | jq --arg k "${rs}" '.[$k]')
+              enf=$(echo "${pol}" | jq -r .enforcement)
+              if [ "${enf}" = when_published ]; then
+                check=$(echo "${pol}" | jq -r '.required_checks.checks[0].context')
+                case "$(publishes "${repo}" "${branch}" "${check}")" in
+                  yes) enf=active ;;
+                  no) enf=disabled ;;
+                  *)
+                    # Can't tell: leave whatever is there alone this run.
+                    echo "info      ${repo}: could not read workflows, ${rs} left as it is"
+                    continue
+                    ;;
+                esac
+              fi
+              want=$(build_ruleset "${rs}" "${pol}" "${enf}")
+              id=$(echo "${list}" | jq -r --arg n "${rs}" '[.[] | select(.name == $n and .source_type == "Repository")][0].id // empty')
+              if [ -n "${id}" ]; then
+                if ! have=$(gh api "repos/${repo}/rulesets/${id}" 2>&1); then
+                  refused "${repo}" "read ruleset ${rs}" "${have}"
+                  continue
+                fi
+                [ "$(ruleset_matches "${want}" "${have}")" = true ] && continue
+                verb=PUT; path="repos/${repo}/rulesets/${id}"; action=update
+              else
+                verb=POST; path="repos/${repo}/rulesets"; action=create
+              fi
+              note="${note} ruleset:${rs}:${action}(${enf})"
+              [ "${DRY_RUN}" = "true" ] && continue
+              if ! out=$(echo "${want}" | gh api -X "${verb}" "${path}" --input - 2>&1); then
+                refused "${repo}" "${action} ruleset ${rs}" "${out}"
+                continue
+              fi
+              # READ BACK: a 2xx is not evidence.
+              id=$(echo "${out}" | jq -r .id)
+              if ! have=$(gh api "repos/${repo}/rulesets/${id}" 2>&1) \
+                  || [ "$(ruleset_matches "${want}" "${have}")" != true ]; then
+                note="${note}(NOT-APPLIED)"
+                failed=$((failed + 1))
+                echo "::warning::${repo}: ruleset ${rs} was accepted but does not read back as the policy"
+              fi
+            done
+
+            if [ -z "${note}" ]; then
+              echo "ok        ${repo}"
+            else
+              changed=$((changed + 1))
+              echo "drift     ${repo}: ${note# }"
+            fi
+          done <<< "${repos}"
+
+          echo
+          echo "${total} repositories, ${changed} drifted, ${failed} failed, ${blocked} refused (token)"
+          {
+            echo "### Repository policy reconcile"
+            echo
+            echo "- owner: \`${OWNER}\` (public, non-archived, non-fork repositories)"
+            echo "- trigger: \`${GITHUB_EVENT_NAME}\`, dry run: \`${DRY_RUN}\`"
+            echo "- repositories: ${total}, drifted: ${changed}, failed: ${failed}, refused (token): ${blocked}"
+            echo
+            echo "Policy source: \`settings.yml\`"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+          # A write that failed or didn't stick is a failure. A token that may
+          # not write is reported above, not failed, so the job isn't red
+          # every night for something only a person can fix.
+          if [ "${failed}" -gt 0 ] && [ "${DRY_RUN}" != "true" ]; then
+            exit 1
+          fi
