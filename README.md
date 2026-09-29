@@ -78,6 +78,70 @@ blocking on protected branches" rather than one fixed value can compute
 `strict` from the triggering event instead of hardcoding it:
 `strict: ${{ github.event_name != 'pull_request' }}`.
 
+## Repository policy: settings, rulesets and auto-merge
+
+`settings.yml` is this account's policy for every **public, non-archived,
+non-fork** repository it owns. No repository is named anywhere: both
+workflows below find the repositories afresh on every run, so a repository
+created tomorrow is covered by the next run with nothing to add. Private
+repositories are left as they are, because on the Free plan GitHub drops
+auto-merge and refuses rulesets there.
+
+| Workflow | When | Does |
+|---|---|---|
+| `repo-settings-reconcile.yml` | push to `settings.yml`, nightly, by hand (dry run by default) | Writes the `repository:` settings (auto-merge, squash, delete branch on merge) and each `repo_rulesets:` entry into every repository, then reads every write back |
+| `auto-merge-sweep.yml` | every 20 minutes, by hand (dry run by default) | Turns on auto-merge for the owner's open pull requests where the base branch is gated |
+
+The rulesets, one body each, written into every repository:
+
+- **`review-gate`** on the default branch: CodeRabbit's approval of the
+  latest commit (dismissed on push), every thread resolved, the `CodeRabbit`
+  check green on an up-to-date branch, squash only, no force-push, no
+  deletion. Only Renovate may merge its own pull requests past it. The copies
+  put on by hand on 2026-09-25 have the same name, so they are updated in
+  place, not duplicated.
+- **`ci-gate`** on the default branch: requires one check named `ci-gate`
+  from GitHub Actions. It is **written active only on repositories that
+  publish that check** (a top-level job named `ci-gate` in a workflow on the
+  default branch) and disabled everywhere else, re-checked every run. So a
+  repository is never blocked on a check it doesn't run, and one that adds
+  the job is gated from the next run on. The job to copy is the one in
+  TanksterAI/.github's README, "The `ci-gate` contract".
+- **`long-lived-branches`**: `main`, `master`, `develop` and everything under
+  `release/` can't be deleted. `delete_branch_on_merge` deletes a merged pull
+  request's head branch, so without this a pull request from `develop` into
+  `main` would take `develop` with it.
+
+Any repository ruleset with another name (holocron's "Main Branch
+Protection", say) is never touched, and keeps applying alongside these.
+
+**Auto-merge arms only behind a gate.** For each of the owner's pull requests,
+`auto-merge-sweep.yml` reads the rules that actually apply to its base branch
+(every ruleset, whatever its name) and arms `gh pr merge --auto --squash` only
+if they require an approval **and** a status check other than CodeRabbit's.
+Otherwise it disarms. GitHub then merges by itself once every rule is met. It
+never arms a stranger's pull request (these repositories are public), a
+bot's (Renovate merges its own), a draft, or one labelled
+`needs-human-review`; adding that label later disarms it on the next run.
+
+**Token.** Both need the `PERSONAL_ADMIN_TOKEN` secret here: a fine-grained
+token for **All repositories** with **Administration**, **Contents** and **Pull
+requests** (read and write). Without it, or when GitHub refuses it, they
+report `NEEDS-TOKEN` and change nothing, rather than failing every run.
+Merges armed with it are made as the owner, so `on: push` workflows fire
+after them, and the review gate still applies: it has no bypass for the owner.
+
+**Before the first run,** check that CodeRabbit's GitHub App can see every
+public repository (Settings > Applications > CodeRabbit > Repository access:
+All repositories). On a repository it can't see, `review-gate` waits for an
+approval and a check that never come. It also stops direct pushes to the
+default branch there, which matters for a repository you edit in the browser
+(this account's profile README, say).
+
+The scenario tests for both are in `tests/`, and run in `self-check.yml`:
+`bash tests/reconcile/test.sh .` and `bash tests/auto-merge-sweep/test.sh .`
+(they need jq, yq v4 and python3).
+
 ## Security tooling, and what is deliberately absent
 
 There is no CodeQL here and nothing uploads SARIF. Both require GitHub Code
@@ -117,7 +181,8 @@ as on the consuming repos, or preset resolution will fail.
 
 A change here lands on every consuming repo at once. Treat it accordingly:
 
-1. Open a PR. `workflows-lint.yml` runs actionlint over the change.
+1. Open a PR. `self-check.yml` runs actionlint over the change, and the
+   scenario tests in `tests/` for the reconciler and the sweep.
 2. Test against one consuming repo by pinning it to the branch
    (`@my-branch` instead of `@v1`) and watching a real run go green.
 3. Merge, then move the `v1` tag:

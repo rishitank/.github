@@ -92,3 +92,29 @@ jobs:
           # up to the next literal `"`, which an escaped `\"` isn't.
           done < <(grep -hoE 'github>[A-Za-z0-9._/-]+(:[A-Za-z0-9_-]+)?' ./*.json | sort -u)
           exit $fail
+
+  # The reconciler and the auto-merge sweep change every repository on the
+  # account, so their shell is tested here, against a mock `gh`, before it can
+  # merge. The tests extract the real `run:` blocks with yq.
+  tests:
+    name: Scenario tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Tools
+        run: |
+          set -euo pipefail
+          for t in yq jq python3; do command -v "$t" >/dev/null || { echo "::error::$t not found on runner"; exit 1; }; done
+          yq --version
+
+      - name: repo-settings-reconcile
+        run: bash tests/reconcile/test.sh .
+
+      - name: auto-merge-sweep
+        run: bash tests/auto-merge-sweep/test.sh .
