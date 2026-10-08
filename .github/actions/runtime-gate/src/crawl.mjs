@@ -30,6 +30,8 @@ const NAV_TIMEOUT = envInt('RG_NAV_TIMEOUT', 30000);
 const SETTLE = envInt('RG_SETTLE_MS', 750);
 const INTERACT = envBool('RG_INTERACT', true);
 const INTERACT_MAX = envInt('RG_INTERACT_MAX', 12);
+const FORMS = envBool('RG_FORMS', true);
+const FORMS_MAX = envInt('RG_FORMS_MAX', 3);
 const MOBILE = envBool('RG_MOBILE', true);
 const SCREENSHOTS = envBool('RG_SCREENSHOTS', true);
 const BASELINE = env('RG_BASELINE_DIR', '');
@@ -193,7 +195,94 @@ async function exercise(page, collector, url) {
       }
     } catch { /* a control that cannot be operated is not an app error */ }
   }
-  return clicked;
+  return clicked + (FORMS ? await submitForms(page, collector, url) : 0);
+}
+
+// Forms whose button says one of these are left alone: they move money,
+// message someone, or destroy something. "Submit", "Search", "Sign up",
+// "Save" and the like are fair game in a throwaway CI environment.
+const FORM_SKIP = /\b(delete|remove|destroy|pay|buy|purchase|checkout|check out|order|unsubscribe|send|publish|reset|deactivate|close account|log ?out|sign ?out|cancel (plan|subscription))\b/i;
+
+function dummyFor(f) {
+  const hint = `${f.name} ${f.label} ${f.placeholder} ${f.autocomplete}`.toLowerCase();
+  switch (f.type) {
+    case 'email': return 'ci@example.com';
+    case 'password': return 'CI-only-password-123!';
+    case 'tel': return '07700900123';
+    case 'url': return 'https://example.com';
+    case 'number': case 'range': return f.min || '1';
+    case 'date': return '2026-01-15';
+    case 'datetime-local': return '2026-01-15T10:30';
+    case 'time': return '10:30';
+    case 'month': return '2026-01';
+    case 'week': return '2026-W03';
+    case 'color': return '#336699';
+    default:
+      if (/e-?mail/.test(hint)) return 'ci@example.com';
+      if (/post ?code|postcode|zip/.test(hint)) return 'SW1A 1AA';
+      if (/phone|mobile|tel/.test(hint)) return '07700900123';
+      if (/name/.test(hint)) return 'Test User';
+      if (/url|website|link/.test(hint)) return 'https://example.com';
+      if (/year/.test(hint)) return '2026';
+      return 'test';
+  }
+}
+
+// Fills each non-destructive form with dummy data and submits it, the way a
+// person trying the app would. Client errors (4xx) caused by the submission
+// are expected (validation, a wrong password) and only reported as warnings;
+// exceptions, console errors and 5xx responses still fail the crawl.
+async function submitForms(page, collector, url) {
+  let submitted = 0;
+  const forms = await page.locator('form').count().catch(() => 0);
+  for (let i = 0; i < forms && submitted < FORMS_MAX; i += 1) {
+    const form = page.locator('form').nth(i);
+    try {
+      if (!(await form.isVisible())) continue;
+      const submit = form.locator('button[type="submit"], button:not([type]), input[type="submit"]').first();
+      const label = (await submit.count())
+        ? await submit.evaluate((n) => (n.getAttribute('aria-label') || n.value || n.textContent || '').trim())
+        : '';
+      if (FORM_SKIP.test(label)) continue;
+      const fields = await form.locator('input, textarea, select').all();
+      for (const el of fields) {
+        const f = await el.evaluate((n) => ({
+          tag: n.tagName, type: (n.getAttribute('type') || 'text').toLowerCase(), name: n.getAttribute('name') || '',
+          label: n.getAttribute('aria-label') || (n.id && document.querySelector(`label[for="${CSS.escape(n.id)}"]`)?.textContent) || '',
+          placeholder: n.getAttribute('placeholder') || '', autocomplete: n.getAttribute('autocomplete') || '',
+          min: n.getAttribute('min') || '', required: n.required, readOnly: n.readOnly, disabled: n.disabled,
+        }));
+        if (f.disabled || f.readOnly || !(await el.isVisible())) continue;
+        if (['hidden', 'submit', 'button', 'reset', 'image', 'file'].includes(f.type)) continue;
+        if (f.tag === 'SELECT') {
+          if ((await el.locator('option').count()) > 1) await el.selectOption({ index: 1 }, { timeout: 2000 });
+        } else if (f.type === 'checkbox' || f.type === 'radio') {
+          if (f.required) await el.check({ timeout: 2000 });
+        } else if (f.tag === 'TEXTAREA') {
+          await el.fill('Runtime gate test message', { timeout: 2000 });
+        } else {
+          await el.fill(dummyFor(f), { timeout: 2000 });
+        }
+      }
+      collector.expectClientErrors = true;
+      if (await submit.count()) {
+        if (!(await submit.isEnabled())) { collector.expectClientErrors = false; continue; }
+        await submit.click({ timeout: 3000 });
+      } else {
+        await form.evaluate((n) => n.requestSubmit());
+      }
+      submitted += 1;
+      await settle(page);
+    } catch { /* a form that cannot be filled is not an app error */ } finally {
+      collector.expectClientErrors = false;
+    }
+    for (const other of page.context().pages()) if (other !== page) await other.close().catch(() => {});
+    if (normalise(page.url()) !== url) {
+      await page.goto(url, { waitUntil: 'load', timeout: NAV_TIMEOUT }).catch(() => {});
+      await settle(page);
+    }
+  }
+  return submitted;
 }
 
 function diff(name) {

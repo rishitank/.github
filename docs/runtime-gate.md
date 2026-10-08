@@ -30,6 +30,11 @@ it:
   menus, switches, checkboxes and selects, and types a query into search
   boxes. It never presses anything that submits a form or reads as
   destructive (delete, pay, sign out, send and similar);
+- fills up to 3 forms per page with dummy data and submits them, the way a
+  person trying the app would. It skips forms whose button says send, pay,
+  delete and the like. A 4xx answer to a dummy submission, such as a
+  rejected sign-in, is expected and only reported as a warning; exceptions,
+  console errors and 5xx responses still fail;
 - follows links client-side, so routing and hydration run as they do for a
   person;
 - probes a missing route;

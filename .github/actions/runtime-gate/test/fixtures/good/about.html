@@ -1,1 +1,3 @@
-<!doctype html><html><head><title>About</title></head><body><a href="/">Home</a><h1>About</h1><p>We make things.</p></body></html>
+<!doctype html><html><head><title>About</title></head><body><a href="/">Home</a><h1>About</h1><p>We make things.</p>
+<form onsubmit="event.preventDefault(); fetch('/api/login',{method:'POST'}).then(function(r){document.getElementById('m').textContent='Wrong email or password ('+r.status+')'})"><label for="e">Email</label><input id="e" type="email" name="email" required><label for="pw">Password</label><input id="pw" type="password" name="password" required><button>Sign in</button></form><p id="m"></p>
+<form onsubmit="event.preventDefault(); throw new Error('a Send form was submitted')"><textarea name="message"></textarea><button type="submit">Send message</button></form></body></html>

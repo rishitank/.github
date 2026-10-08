@@ -57,6 +57,8 @@ test('healthy site passes', () => {
   const home = report.pages.find((p) => p.url === 'http://127.0.0.1:4711/');
   assert.ok(home.clicked >= 5, `plain buttons, select, search and disclosures are exercised (clicked ${home.clicked})`);
   assert.ok(!report.findings.some((f) => /destructive control was pressed/.test(f.message)), 'controls that read as destructive are never pressed');
+  assert.ok(!report.findings.some((f) => /a Send form was submitted/.test(f.message)), 'forms that send messages are never submitted');
+  assert.ok(report.findings.some((f) => !f.blocking && /404 POST .*\/api\/login .*after submitting a form/.test(f.message)), 'a 4xx answering a dummy sign-in is a warning, not a failure');
 });
 
 test('broken site fails with every kind of breakage', () => {
@@ -70,6 +72,7 @@ test('broken site fails with every kind of breakage', () => {
   assert.ok(report.findings.some((f) => /menu exploded/.test(f.message)), 'errors thrown by clicking a control are caught');
   assert.ok(report.findings.some((f) => /undefinedFunctionCall/.test(f.message)), 'errors thrown by a plain button are caught');
   assert.ok(report.findings.some((f) => /null/.test(f.message) && f.kind === 'uncaught-exception'), 'errors thrown by searching are caught');
+  assert.ok(report.findings.some((f) => f.blocking && f.page.includes('/contact') && /results|undefined/.test(f.message)), 'a form whose submission crashes the page is caught (filled with dummy data, disabled submit enabled by typing)');
 });
 
 test('ignore list tolerates a known console message', () => {

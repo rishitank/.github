@@ -56,6 +56,12 @@ inputs:
   interact-max:
     description: Most controls to operate per page.
     default: "12"
+  forms:
+    description: >-
+      Fill each page's forms with dummy data and submit them (never ones whose
+      button says send, pay, delete and the like). A 4xx answer to a dummy
+      submission is a warning; exceptions, console errors and 5xx still fail.
+    default: "true"
   baseline-dir:
     description: A previous report directory to compare screenshots against.
     default: ""
@@ -199,6 +205,7 @@ runs:
         RG_MOBILE: ${{ inputs.mobile }}
         RG_INTERACT: ${{ inputs.interact }}
         RG_INTERACT_MAX: ${{ inputs.interact-max }}
+        RG_FORMS: ${{ inputs.forms }}
         RG_BASELINE_DIR: ${{ inputs.baseline-dir }}
         RG_DIFF_THRESHOLD: ${{ inputs.diff-threshold }}
         RG_HTTP_USER: ${{ inputs.http-user }}

@@ -105,6 +105,8 @@ export class Collector {
     // moment of the error (the explorer), rather than to a label the caller
     // set (the crawler, which adds "(phone)" and similar).
     this.live = false;
+    // Set while the crawler submits a form with dummy data.
+    this.expectClientErrors = false;
   }
 
   ignored(text) {
@@ -166,8 +168,11 @@ export class Collector {
       if (expected === status) return;
       const own = sameOrigin(url, this.baseUrl);
       const isDoc = res.request().resourceType() === 'document';
-      this.add(isDoc ? 'http-error-page' : 'http-error-resource', `${status} ${res.request().method()} ${url}`, {
-        blocking: own,
+      // A 4xx answering a form the crawler just submitted with dummy data is
+      // the app doing its job (validation, wrong password): report, don't fail.
+      const duringForm = this.expectClientErrors && status < 500;
+      this.add(isDoc ? 'http-error-page' : 'http-error-resource', `${status} ${res.request().method()} ${url}${duringForm ? ' (after submitting a form with dummy data)' : ''}`, {
+        blocking: own && !duringForm,
         url,
         status,
         ...at(),
