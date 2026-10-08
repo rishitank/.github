@@ -184,6 +184,12 @@ the crawl runs twice, signed out and signed in; the explorer starts signed in.
 A sign-in that stops working is a blocking `login-failed` finding: if a
 dependency update breaks sign-in, that is what the gate is for.
 
+The gate signs in before the signed-out crawl starts, because that crawl
+fills sign-up forms with its own dummy address (`ci@example.com`) and could
+otherwise claim the test account's address first. A `login-check` page may
+contain a change-password form: only a form with a single password field
+counts as "still on the sign-in page".
+
 The signed-in crawl skips public pages that already rendered fine for a
 visitor, never opens sign-out links, and never submits a form with a password
 field (that would change the test account or sign in as someone else).

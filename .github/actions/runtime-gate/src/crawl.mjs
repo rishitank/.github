@@ -245,6 +245,7 @@ async function submitForms(page, collector, url, { signedIn = false } = {}) {
   const forms = await page.locator('form').count().catch(() => 0);
   for (let i = 0; i < Math.min(forms, 30); i += 1) {
     const form = page.locator('form').nth(i);
+    let submittedThis = false;
     try {
       if (!(await form.isVisible())) continue;
       found += 1;
@@ -285,12 +286,16 @@ async function submitForms(page, collector, url, { signedIn = false } = {}) {
         await form.evaluate((n) => n.requestSubmit());
       }
       submitted += 1;
+      submittedThis = true;
       await settle(page);
     } catch { /* a form that cannot be filled is not an app error */ } finally {
       collector.expectClientErrors = false;
     }
     for (const other of page.context().pages()) if (other !== page) await other.close().catch(() => {});
-    if (normalise(page.url()) !== url) {
+    // Always load the page afresh after a submission, even when the URL did
+    // not change: a form result left in history would be re-posted by the
+    // next "back", and the next form should start from a clean page.
+    if (submittedThis || normalise(page.url()) !== url) {
       await page.goto(url, { waitUntil: 'load', timeout: NAV_TIMEOUT }).catch(() => {});
       await settle(page);
     }
@@ -608,6 +613,29 @@ async function main() {
   const fromSitemap = (await sitemapUrls(probe.request)).map(normalise).filter(Boolean);
   await probe.close();
 
+  // Sign in first, before the signed-out crawl submits the sign-up and
+  // sign-in forms with its own dummy data (which could register the test
+  // account's address with a different password).
+  let auth = { status: 'not configured' };
+  let state = null;
+  let authPass = { pages: [], discovered: new Set(), duplicates: 0 };
+  let landed = '';
+  if (LOGIN.enabled) {
+    const lctx = await browser.newContext(contextOptions({ reducedMotion: 'reduce' }));
+    lctx.setDefaultNavigationTimeout(NAV_TIMEOUT);
+    collector.attach(lctx);
+    const res = await signIn(lctx, BASE, LOGIN, collector);
+    if (res.ok) {
+      state = await lctx.storageState();
+      landed = res.landed;
+      auth = { status: 'signed in', user: LOGIN.username, landed: res.landed.replace(BASE, '') || '/' };
+    } else {
+      auth = { status: 'failed', user: LOGIN.username, reason: res.reason };
+      collector.add('login-failed', `could not sign in as ${LOGIN.username}: ${res.reason}`, { page: `${BASE}${LOGIN.path || '/'} (sign-in)` });
+    }
+    await lctx.close();
+  }
+
   const anon = await crawlPass({
     browser, collector, coverage, retryInfo, pinned,
     seeds: [...new Set([...pinned, ...fromSitemap])],
@@ -634,7 +662,9 @@ async function main() {
       await link.click({ timeout: 5000 }).catch(() => {});
       await settle(page);
       await inspect(page, collector, collector.currentPage);
-      await page.goBack({ waitUntil: 'load' }).catch(() => page.goto(`${BASE}/`));
+      // Not goBack(): if the entry before is a form result, going back
+      // re-POSTs the form, which is the crawler's doing, not the app's.
+      await page.goto(`${BASE}/`, { waitUntil: 'load' }).catch(() => {});
       await settle(page);
     }
   } catch (err) {
@@ -682,38 +712,21 @@ async function main() {
 
   // Signed in: the same crawl again with the test account's session, over the
   // pages a visitor cannot reach (and the home page, which often differs).
-  let auth = { status: 'not configured' };
-  let state = null;
-  let authPass = { pages: [], discovered: new Set(), duplicates: 0 };
-  if (LOGIN.enabled) {
-    const lctx = await browser.newContext(contextOptions({ reducedMotion: 'reduce' }));
-    lctx.setDefaultNavigationTimeout(NAV_TIMEOUT);
-    collector.attach(lctx);
-    const res = await signIn(lctx, BASE, LOGIN, collector);
-    if (res.ok) {
-      state = await lctx.storageState();
-      auth = { status: 'signed in', user: LOGIN.username, landed: res.landed.replace(BASE, '') || '/' };
-    } else {
-      auth = { status: 'failed', user: LOGIN.username, reason: res.reason };
-      collector.add('login-failed', `could not sign in as ${LOGIN.username}: ${res.reason}`, { page: `${BASE}${LOGIN.path || '/'} (sign-in)` });
-    }
-    await lctx.close();
-    if (state) {
-      const anonByUrl = new Map(anon.pages.map((p) => [p.url, p]));
-      const authPinned = [...new Set([normalise(res.landed), LOGIN.check ? normalise(LOGIN.check) : null, ...pinned].filter(Boolean))];
-      // A public page that rendered fine for a visitor is not crawled twice;
-      // pages that redirected (usually to the sign-in page) are.
-      const skip = (u) => {
-        if (authPinned.includes(u)) return false;
-        const a = anonByUrl.get(u);
-        return Boolean(a && a.status && a.status < 400 && a.finalUrl && normalise(a.finalUrl) === u);
-      };
-      authPass = await crawlPass({
-        browser, collector, coverage, retryInfo, pinned: authPinned, seeds: authPinned,
-        suffix: ' (signed in)', shotPrefix: 'auth-', maxPages: AUTH_MAX_PAGES, signedIn: true, state, skip,
-      });
-      await authPass.context.close();
-    }
+  if (state) {
+    const anonByUrl = new Map(anon.pages.map((p) => [p.url, p]));
+    const authPinned = [...new Set([normalise(landed), LOGIN.check ? normalise(LOGIN.check) : null, ...pinned].filter(Boolean))];
+    // A public page that rendered fine for a visitor is not crawled twice;
+    // pages that redirected (usually to the sign-in page) are.
+    const skip = (u) => {
+      if (authPinned.includes(u)) return false;
+      const a = anonByUrl.get(u);
+      return Boolean(a && a.status && a.status < 400 && a.finalUrl && normalise(a.finalUrl) === u);
+    };
+    authPass = await crawlPass({
+      browser, collector, coverage, retryInfo, pinned: authPinned, seeds: authPinned,
+      suffix: ' (signed in)', shotPrefix: 'auth-', maxPages: AUTH_MAX_PAGES, signedIn: true, state, skip,
+    });
+    await authPass.context.close();
   }
 
   const flows = await replayFlows(browser, collector, state);

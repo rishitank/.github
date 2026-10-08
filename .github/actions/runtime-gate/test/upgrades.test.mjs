@@ -17,6 +17,7 @@ const servers = [];
 const GOOD = 'http://127.0.0.1:4821';
 const BROKEN = 'http://127.0.0.1:4822';
 const FLAKY = 'http://127.0.0.1:4823';
+const FRESH = 'http://127.0.0.1:4825'; // no crawl has registered anyone here yet
 
 function app(port, ...flags) {
   servers.push(spawn(process.execPath, [path.join(here, 'fixtures/app-server.mjs'), String(port), ...flags], { stdio: 'ignore' }));
@@ -48,7 +49,8 @@ before(async () => {
   app(4821);
   app(4822, 'broken');
   app(4823);
-  await Promise.all([GOOD, BROKEN, FLAKY].map((u) => waitFor(`${u}/`)));
+  app(4825);
+  await Promise.all([GOOD, BROKEN, FLAKY, FRESH].map((u) => waitFor(`${u}/`)));
 });
 
 after(() => { for (const p of servers) p.kill(); });
@@ -135,6 +137,17 @@ test('a crash behind the login fails the run; quarantine makes it non-blocking',
   const q = run('crawl.mjs', { RG_URL: BROKEN, ...LOGIN, RG_LOGIN_USERNAME: 'broken2@example.com', RG_QUARANTINE: 'add item exploded @ /dashboard' });
   assert.equal(q.status, 0, q.log);
   assert.ok(q.report.findings.some((x) => /add item exploded/.test(x.message) && x.quarantined && !x.blocking));
+});
+
+test('signs in before the signed-out crawl can claim the account; a settings page with a password form is not the sign-in page', () => {
+  // The signed-out crawl registers ci@example.com with its own dummy password
+  // through any open sign-up form; signing in first means the test account
+  // can use that address too.
+  const r = run('crawl.mjs', { RG_URL: FRESH, ...LOGIN, RG_LOGIN_USERNAME: 'ci@example.com', RG_LOGIN_PASSWORD: 'gate-password-123', RG_LOGIN_CHECK: '/settings', RG_INTERACT: 'false' });
+  assert.equal(r.status, 0, r.log);
+  assert.equal(r.report.coverage.signIn.status, 'signed in', JSON.stringify(r.report.coverage.signIn));
+  const settings = r.report.pages.find((p) => p.signedIn && p.url === `${FRESH}/settings`);
+  assert.ok(settings && settings.formsSubmitted === 0, 'the change-password form is never submitted while signed in');
 });
 
 test('a sign-in that does not work is a blocking finding', () => {

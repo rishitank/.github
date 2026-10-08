@@ -10,7 +10,7 @@ import http from 'node:http';
 
 const port = Number(process.argv[2] || 4800);
 const broken = process.argv.includes('broken');
-const users = new Map([['ci@example.com', 'CI-only-password-123!']]);
+const users = new Map([['seeded@example.com', 'seeded-password-123']]);
 let flakyHits = 0;
 
 const page = (title, body) => `<!doctype html><html><head><title>${title}</title><script src="/app.js" defer></script></head><body><nav><a href="/">Home</a> <a href="/login">Sign in</a> <a href="/promo">Promo</a></nav>${body}</body></html>`;
@@ -46,6 +46,7 @@ http.createServer(async (req, res) => {
   }
   if (url.pathname === '/signup' && req.method === 'POST') {
     const f = await readForm(req);
+    if (users.has(f.email)) return send(res, 409, page('Sign up', '<h1>Create account</h1><p role="alert">That email is already registered.</p>'));
     users.set(f.email, f.password);
     return send(res, 303, '', { location: '/login' });
   }
@@ -57,11 +58,16 @@ http.createServer(async (req, res) => {
     if (users.get(f.email) === f.password) return send(res, 303, '', { location: '/dashboard', 'set-cookie': 'session=ok; Path=/; HttpOnly' });
     return send(res, 401, page('Sign in', '<h1>Sign in</h1><p role="alert">Wrong email or password.</p>'));
   }
+  if (url.pathname === '/settings') {
+    // Signed in, with a change-password form: must not read as "still on the sign-in page".
+    if (!signedIn) return send(res, 303, '', { location: '/login' });
+    return send(res, 200, page('Settings', '<h1>Settings</h1><form method="post" action="/settings"><label for="c">Current password</label><input id="c" type="password" autocomplete="current-password"><label for="n">New password</label><input id="n" type="password" autocomplete="new-password"><button type="submit">Change password</button></form>'));
+  }
   if (url.pathname === '/dashboard' || url.pathname === '/items') {
     if (!signedIn) return send(res, 303, '', { location: '/login' });
     if (url.pathname === '/items') return send(res, 200, page('Items', '<h1>Items</h1><ul id="list"><li>Item 1</li></ul><a href="/dashboard">Back to dashboard</a>'));
     const handler = broken ? 'throw new Error(\'add item exploded\')' : 'document.getElementById(\'n\').textContent = String(Number(document.getElementById(\'n\').textContent) + 1)';
-    return send(res, 200, page('Dashboard', `<h1>Dashboard</h1><p>Items: <span id="n">0</span></p><button onclick="${handler}">Add item</button><a href="/items">All items</a><a href="/logout">Sign out</a>`));
+    return send(res, 200, page('Dashboard', `<h1>Dashboard</h1><p>Items: <span id="n">0</span></p><button onclick="${handler}">Add item</button><a href="/items">All items</a><a href="/settings">Settings</a><a href="/logout">Sign out</a>`));
   }
   if (url.pathname === '/logout') return send(res, 303, '', { location: '/', 'set-cookie': 'session=; Path=/; Max-Age=0' });
   if (url.pathname === '/flaky') {

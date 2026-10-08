@@ -41,6 +41,22 @@ async function settle(page) {
   await page.waitForTimeout(500);
 }
 
+// A sign-in form has exactly one visible password field. Change-password and
+// sign-up forms have two or more, or mark theirs as a new password, so a
+// signed-in settings page is not mistaken for "still on the sign-in page".
+async function showsSignInForm(page) {
+  return page.evaluate(() => {
+    const visible = (el) => !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+    const scopes = [...document.querySelectorAll('form')];
+    const loose = [...document.querySelectorAll('input[type="password"]')].filter((i) => !i.closest('form'));
+    if (loose.length) scopes.push({ querySelectorAll: () => loose });
+    return scopes.some((f) => {
+      const pw = [...f.querySelectorAll('input[type="password"]')].filter(visible);
+      return pw.length === 1 && pw[0].getAttribute('autocomplete') !== 'new-password';
+    });
+  }).catch(() => false);
+}
+
 function pathOf(url) {
   try { return new URL(url).pathname.replace(/\/+$/, '') || '/'; } catch { return ''; }
 }
@@ -144,11 +160,11 @@ export async function signIn(context, base, cfg, collector) {
       const res = await page.goto(`${base}${cfg.check}`, { waitUntil: 'load', timeout: 30000 });
       await settle(page);
       const status = res?.status() ?? 0;
-      ok = status > 0 && status < 400 && (!loginPath || pathOf(page.url()) !== loginPath) && !(await page.locator(PASSWORD).count());
+      ok = status > 0 && status < 400 && (!loginPath || pathOf(page.url()) !== loginPath) && !(await showsSignInForm(page));
       landed = page.url();
       if (!ok) return { ok, landed, reason: `opening ${cfg.check} after signing in ended on ${pathOf(page.url())} (HTTP ${status})${await alertText(page) ? `; the page says "${await alertText(page)}"` : ''}` };
     } else {
-      const formGone = !(await page.locator(`${PASSWORD}:visible`).count());
+      const formGone = !(await showsSignInForm(page));
       ok = formGone || (loginPath && pathOf(page.url()) !== loginPath);
       if (!ok) return { ok, landed, reason: `still on the sign-in form after submitting${await alertText(page) ? `; the page says "${await alertText(page)}"` : ''}` };
     }
