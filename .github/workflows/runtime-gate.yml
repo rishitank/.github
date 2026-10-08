@@ -161,6 +161,10 @@ on:
         description: Most controls to operate per page.
         type: number
         default: 12
+      forms:
+        description: Fill forms with dummy data and submit them (never send/pay/delete ones).
+        type: boolean
+        default: true
       http-user:
         description: Basic-auth user for a staging gate (dummy CI value).
         type: string
@@ -439,7 +443,7 @@ jobs:
 
       - name: Start app (static)
         if: inputs.mode == 'static'
-        uses: rishitank/.github/.github/actions/runtime-gate@f6260c05d2a4684f79a9bb0e674e763268ab1b23
+        uses: rishitank/.github/.github/actions/runtime-gate@95576dc6546318e0b0d71bce15da200c142d6cac
         with:
           mode: serve
           serve-dir: ${{ inputs.working-directory }}/${{ inputs.static-dir }}
@@ -511,7 +515,7 @@ jobs:
       - name: Crawl
         id: crawl
         continue-on-error: true
-        uses: rishitank/.github/.github/actions/runtime-gate@f6260c05d2a4684f79a9bb0e674e763268ab1b23
+        uses: rishitank/.github/.github/actions/runtime-gate@95576dc6546318e0b0d71bce15da200c142d6cac
         with:
           mode: crawl
           url: ${{ env.RG_BASE }}
@@ -524,6 +528,7 @@ jobs:
           mobile: ${{ inputs.mobile }}
           interact: ${{ inputs.interact }}
           interact-max: ${{ inputs.interact-max }}
+          forms: ${{ inputs.forms }}
           http-user: ${{ inputs.http-user }}
           http-password: ${{ inputs.http-password }}
           browser: ${{ inputs.browser }}
@@ -553,7 +558,7 @@ jobs:
       - name: Explore (AI, advisory)
         if: steps.plan.outputs.explore == 'true'
         continue-on-error: true
-        uses: rishitank/.github/.github/actions/runtime-gate@f6260c05d2a4684f79a9bb0e674e763268ab1b23
+        uses: rishitank/.github/.github/actions/runtime-gate@95576dc6546318e0b0d71bce15da200c142d6cac
         with:
           mode: explore
           url: ${{ env.RG_BASE }}
