@@ -106,7 +106,7 @@ jobs:
       - name: Merge into the flows file
         id: merge
         if: steps.collect.outputs.files != ''
-        uses: rishitank/.github/.github/actions/runtime-gate@715af0ee0d7198e02581641db2cc10492ae37707
+        uses: rishitank/.github/.github/actions/runtime-gate@1064cf0fcb847ed346a02964ec4bc432bfad3202
         with:
           mode: merge-flows
           flows-new: ${{ steps.collect.outputs.files }}

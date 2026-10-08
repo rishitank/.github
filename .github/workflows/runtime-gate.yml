@@ -502,7 +502,7 @@ jobs:
 
       - name: Start app (static)
         if: inputs.mode == 'static'
-        uses: rishitank/.github/.github/actions/runtime-gate@715af0ee0d7198e02581641db2cc10492ae37707
+        uses: rishitank/.github/.github/actions/runtime-gate@1064cf0fcb847ed346a02964ec4bc432bfad3202
         with:
           mode: serve
           serve-dir: ${{ inputs.working-directory }}/${{ inputs.static-dir }}
@@ -574,7 +574,7 @@ jobs:
       - name: Crawl
         id: crawl
         continue-on-error: true
-        uses: rishitank/.github/.github/actions/runtime-gate@715af0ee0d7198e02581641db2cc10492ae37707
+        uses: rishitank/.github/.github/actions/runtime-gate@1064cf0fcb847ed346a02964ec4bc432bfad3202
         with:
           mode: crawl
           url: ${{ env.RG_BASE }}
@@ -628,7 +628,7 @@ jobs:
       - name: Explore (AI, advisory)
         if: steps.plan.outputs.explore == 'true'
         continue-on-error: true
-        uses: rishitank/.github/.github/actions/runtime-gate@715af0ee0d7198e02581641db2cc10492ae37707
+        uses: rishitank/.github/.github/actions/runtime-gate@1064cf0fcb847ed346a02964ec4bc432bfad3202
         with:
           mode: explore
           url: ${{ env.RG_BASE }}
