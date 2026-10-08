@@ -189,6 +189,32 @@ export class Collector {
   }
 }
 
+// Plausible dummy input for a form field, from its type and label.
+export function dummyFor(f) {
+  const hint = `${f.name} ${f.label} ${f.placeholder} ${f.autocomplete}`.toLowerCase();
+  switch (f.type) {
+    case 'email': return 'ci@example.com';
+    case 'password': return 'CI-only-password-123!';
+    case 'tel': return '07700900123';
+    case 'url': return 'https://example.com';
+    case 'number': case 'range': return f.min || '1';
+    case 'date': return '2026-01-15';
+    case 'datetime-local': return '2026-01-15T10:30';
+    case 'time': return '10:30';
+    case 'month': return '2026-01';
+    case 'week': return '2026-W03';
+    case 'color': return '#336699';
+    default:
+      if (/e-?mail/.test(hint)) return 'ci@example.com';
+      if (/post ?code|postcode|zip/.test(hint)) return 'SW1A 1AA';
+      if (/phone|mobile|tel/.test(hint)) return '07700900123';
+      if (/name/.test(hint)) return 'Test User';
+      if (/url|website|link/.test(hint)) return 'https://example.com';
+      if (/year/.test(hint)) return '2026';
+      return 'test';
+  }
+}
+
 export function slugFor(url) {
   const u = new URL(url);
   const p = (u.pathname + (u.search ? `_${u.search.slice(1)}` : '')).replace(/[^a-zA-Z0-9]+/g, '_').replace(/^_+|_+$/g, '');

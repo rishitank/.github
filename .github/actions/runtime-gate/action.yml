@@ -1,14 +1,16 @@
 name: runtime-gate
 description: >-
   Use a running web app in a real browser and report runtime breakage.
-  mode=crawl is deterministic and fails on errors; mode=explore lets Gemini
-  use the app like a person and is advisory.
+  mode=crawl is deterministic and fails on errors (signed out and signed in,
+  plus replay of recorded flows); mode=explore lets Gemini use the app like a
+  person, screened against prompt injection, and is advisory.
 
 inputs:
   mode:
     description: >-
-      crawl, explore, or serve (start the bundled static file server in the
-      background for build output that is plain files).
+      crawl, explore, serve (start the bundled static file server in the
+      background for build output that is plain files), or merge-flows (fold
+      newly recorded flows into the repo's flows file; installs nothing).
     default: crawl
   serve-dir:
     description: mode=serve. Directory to serve.
@@ -73,6 +75,59 @@ inputs:
     default: ""
   http-password:
     default: ""
+  login-path:
+    description: >-
+      Sign-in page (e.g. /login). When set, the crawler signs in with the test
+      account and crawls again behind the login; the explorer starts signed in.
+    default: ""
+  login-username:
+    description: Test account user name or email (CI-only dummy).
+    default: ci@example.com
+  login-password:
+    description: Test account password (CI-only dummy, never a real credential).
+    default: ""
+  signup-path:
+    description: Register the test account here first (apps with no seed data).
+    default: ""
+  login-check:
+    description: A path only signed-in users can open; proves the sign-in worked.
+    default: ""
+  login-script:
+    description: >-
+      Repo module that signs in when a plain form won't do. Default export:
+      async ({ page, context, base, username, password }) => void.
+    default: ""
+  auth-max-pages:
+    description: Most pages for the signed-in crawl.
+    default: "25"
+  flows-file:
+    description: Recorded flows to replay (written by the explorer on the default branch).
+    default: .github/runtime-gate-flows.json
+  flows-new:
+    description: mode=merge-flows. Newline-separated flows.json files from the explorer, newest first.
+    default: ""
+  flows-max:
+    description: mode=merge-flows. Most flows to keep.
+    default: "20"
+  flows-strict:
+    description: >-
+      auto (a flow that can no longer be done blocks dependency-update PRs and
+      warns on others), true or false.
+    default: auto
+  deps-pr:
+    description: '"true" when the change under test is a dependency update (used by flows-strict: auto).'
+    default: "false"
+  retry:
+    description: Open pages with blocking findings once more; findings that do not recur are reported as flaky.
+    default: "true"
+  quarantine:
+    description: >-
+      Regexes (newline-separated) for known problems to show but not block on,
+      matched against "kind: message @ /path". Keep short; add an issue link.
+    default: ""
+  js-coverage:
+    description: Measure how much of the app's own JavaScript ran (Chromium only).
+    default: "true"
   browser:
     description: >-
       chromium (full browser, new headless; default), chrome (branded Google
@@ -102,11 +157,22 @@ inputs:
   explore-context:
     description: Free text about the change under test, e.g. the PR title.
     default: ""
+  explore-guard:
+    description: >-
+      Prompt-injection screening of every page before the model sees it:
+      model (heuristics plus a small classifier model), heuristic, or off.
+    default: model
+  explore-guard-model:
+    description: The classifier model (has its own free-tier limits).
+    default: gemini-flash-lite-latest
 
 outputs:
   passed:
     description: crawl mode only; "true" when no blocking problem was found.
     value: ${{ steps.run.outputs.passed }}
+  flows-changed:
+    description: merge-flows mode only; "true" when the flows file changed.
+    value: ${{ steps.merge.outputs.changed }}
 
 runs:
   using: composite
@@ -115,8 +181,14 @@ runs:
       id: node
       shell: bash
       run: |
+        case "${MODE}" in
+          crawl|explore|serve|merge-flows) ;;
+          *) echo "::error title=runtime-gate::mode must be crawl, explore, serve or merge-flows, not '${MODE}'"; exit 1 ;;
+        esac
         major=$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)
         if [ "${major}" -ge 22 ]; then echo "ok=true" >> "$GITHUB_OUTPUT"; else echo "ok=false" >> "$GITHUB_OUTPUT"; fi
+      env:
+        MODE: ${{ inputs.mode }}
 
     # Only when the job has no recent Node. Runs after the app has started,
     # so it cannot change the runtime the app was built with.
@@ -144,8 +216,33 @@ runs:
         SERVE_PORT: ${{ inputs.serve-port }}
         SPA: ${{ inputs.spa }}
 
+    - name: Merge recorded flows
+      id: merge
+      if: inputs.mode == 'merge-flows'
+      shell: bash
+      run: |
+        set -euo pipefail
+        added=()
+        while IFS= read -r f; do
+          f="${f%$'\r'}"
+          [ -n "${f// }" ] && added+=("${f}")
+        done <<< "${FLOWS_NEW}"
+        if [ "${#added[@]}" -eq 0 ]; then
+          echo "changed=false" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+        existing="${FLOWS_FILE}"
+        [ -f "${existing}" ] || existing="-"
+        mkdir -p "$(dirname "${FLOWS_FILE}")"
+        node "${GITHUB_ACTION_PATH}/src/flows.mjs" merge "${existing}" "${RUNNER_TEMP}/rg-flows.json" "${FLOWS_MAX}" "${added[@]}"
+        cp "${RUNNER_TEMP}/rg-flows.json" "${FLOWS_FILE}"
+      env:
+        FLOWS_NEW: ${{ inputs.flows-new }}
+        FLOWS_FILE: ${{ inputs.flows-file }}
+        FLOWS_MAX: ${{ inputs.flows-max }}
+
     - name: Install toolkit
-      if: inputs.mode != 'serve'
+      if: inputs.mode == 'crawl' || inputs.mode == 'explore'
       shell: bash
       run: |
         set -euo pipefail
@@ -174,7 +271,7 @@ runs:
 
     - name: Run
       id: run
-      if: inputs.mode != 'serve'
+      if: inputs.mode == 'crawl' || inputs.mode == 'explore'
       shell: bash
       run: |
         set -uo pipefail
@@ -208,6 +305,19 @@ runs:
         RG_FORMS: ${{ inputs.forms }}
         RG_BASELINE_DIR: ${{ inputs.baseline-dir }}
         RG_DIFF_THRESHOLD: ${{ inputs.diff-threshold }}
+        RG_LOGIN_PATH: ${{ inputs.login-path }}
+        RG_LOGIN_USERNAME: ${{ inputs.login-username }}
+        RG_LOGIN_PASSWORD: ${{ inputs.login-password }}
+        RG_SIGNUP_PATH: ${{ inputs.signup-path }}
+        RG_LOGIN_CHECK: ${{ inputs.login-check }}
+        RG_LOGIN_SCRIPT: ${{ inputs.login-script }}
+        RG_AUTH_MAX_PAGES: ${{ inputs.auth-max-pages }}
+        RG_FLOWS_FILE: ${{ inputs.flows-file }}
+        RG_FLOWS_STRICT: ${{ inputs.flows-strict }}
+        RG_DEPS_PR: ${{ inputs.deps-pr }}
+        RG_RETRY: ${{ inputs.retry }}
+        RG_QUARANTINE: ${{ inputs.quarantine }}
+        RG_JS_COVERAGE: ${{ inputs.js-coverage }}
         RG_HTTP_USER: ${{ inputs.http-user }}
         RG_HTTP_PASSWORD: ${{ inputs.http-password }}
         RG_BROWSER: ${{ inputs.browser }}
@@ -220,3 +330,5 @@ runs:
         RG_EXPLORE_HINTS: ${{ inputs.explore-hints-file }}
         RG_EXPLORE_FOCUS: ${{ inputs.explore-focus }}
         RG_EXPLORE_CONTEXT: ${{ inputs.explore-context }}
+        RG_EXPLORE_GUARD: ${{ inputs.explore-guard }}
+        RG_EXPLORE_GUARD_MODEL: ${{ inputs.explore-guard-model }}
