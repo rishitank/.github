@@ -118,7 +118,9 @@ on:
         description: >-
           Newline-separated KEY=VALUE environment for build and runtime. CI-only
           dummy values; never real secrets. DATABASE_URL is added
-          automatically when `postgres` is set.
+          automatically when `postgres` is set. In docker mode these reach the
+          running container only; values the image needs at build time (for
+          example NEXT_PUBLIC_*) go in docker-build-args.
         type: string
         default: ""
       postgres:
@@ -152,8 +154,13 @@ on:
         type: boolean
         default: true
       interact:
+        description: Operate safe controls on each page (never submit or destructive ones).
         type: boolean
         default: true
+      interact-max:
+        description: Most controls to operate per page.
+        type: number
+        default: 12
       http-user:
         description: Basic-auth user for a staging gate (dummy CI value).
         type: string
@@ -432,7 +439,7 @@ jobs:
 
       - name: Start app (static)
         if: inputs.mode == 'static'
-        uses: rishitank/.github/.github/actions/runtime-gate@93322a6412ad6b0e1c16286a7a15ac53806bc68e
+        uses: rishitank/.github/.github/actions/runtime-gate@f6260c05d2a4684f79a9bb0e674e763268ab1b23
         with:
           mode: serve
           serve-dir: ${{ inputs.working-directory }}/${{ inputs.static-dir }}
@@ -504,7 +511,7 @@ jobs:
       - name: Crawl
         id: crawl
         continue-on-error: true
-        uses: rishitank/.github/.github/actions/runtime-gate@93322a6412ad6b0e1c16286a7a15ac53806bc68e
+        uses: rishitank/.github/.github/actions/runtime-gate@f6260c05d2a4684f79a9bb0e674e763268ab1b23
         with:
           mode: crawl
           url: ${{ env.RG_BASE }}
@@ -516,6 +523,7 @@ jobs:
           max-pages: ${{ inputs.max-pages }}
           mobile: ${{ inputs.mobile }}
           interact: ${{ inputs.interact }}
+          interact-max: ${{ inputs.interact-max }}
           http-user: ${{ inputs.http-user }}
           http-password: ${{ inputs.http-password }}
           browser: ${{ inputs.browser }}
@@ -545,7 +553,7 @@ jobs:
       - name: Explore (AI, advisory)
         if: steps.plan.outputs.explore == 'true'
         continue-on-error: true
-        uses: rishitank/.github/.github/actions/runtime-gate@93322a6412ad6b0e1c16286a7a15ac53806bc68e
+        uses: rishitank/.github/.github/actions/runtime-gate@f6260c05d2a4684f79a9bb0e674e763268ab1b23
         with:
           mode: explore
           url: ${{ env.RG_BASE }}
