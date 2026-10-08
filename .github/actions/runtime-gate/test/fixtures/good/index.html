@@ -1,0 +1,9 @@
+<!doctype html><html><head><title>Home</title></head><body>
+<nav><a href="/about">About</a> <a href="/contact">Contact</a> <a href="/items/1">Item 1</a> <a href="/items/2">Item 2</a> <a href="https://example.invalid/out">External</a></nav>
+<h1>Welcome</h1>
+<div role="tablist"><button role="tab" aria-selected="true">One</button><button role="tab" aria-selected="false" onclick="document.getElementById('p').textContent='Two'">Two</button></div>
+<p id="p">One</p>
+<details><summary>More</summary><p>Hidden detail</p></details>
+<button aria-expanded="false" onclick="this.setAttribute('aria-expanded','true')">Menu</button>
+<form><input name="q"><button type="submit">Search</button></form>
+</body></html>
