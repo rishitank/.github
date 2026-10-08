@@ -52,6 +52,7 @@ needs to be insulated from that.
 | `rust-ci.yml` | Rust | fmt, clippy `-D warnings`, test, release build, and the no-panics-in-production gate |
 | `security.yml` | any | osv-scanner + gitleaks + ecosystem audit |
 | `lighthouse-ci.yml` | Node / web frontends | `lhci autorun` against a locally built app, plus a sticky PR comment with the score table; advisory by default |
+| `runtime-gate.yml` | web apps (any stack) | boots the app (Dockerfile, command or static), crawls it in a real browser and **fails on runtime errors**: exceptions, console errors, hydration errors, failed requests, 4xx/5xx, blank pages; plus advisory screenshot diffs and an advisory Gemini explorer that uses the app like a person. See `docs/runtime-gate.md` |
 | `lockfile.yml` | Node / TypeScript | `workflow_dispatch` lockfile regeneration that proves the result before committing |
 | `workflows-lint.yml` | any | actionlint over `.github/workflows/`, self-updating and cached |
 
@@ -77,6 +78,33 @@ this repository for a starting point. A repo that wants "advisory on PRs,
 blocking on protected branches" rather than one fixed value can compute
 `strict` from the triggering event instead of hardcoding it:
 `strict: ${{ github.event_name != 'pull_request' }}`.
+
+## Runtime gate: does the app still work?
+
+`runtime-gate.yml` exists because a dependency update can pass build, lint and
+unit tests and still break the running app. It boots the app the way it is
+deployed, uses it in a real browser, and fails the check on runtime errors, so
+Renovate cannot merge an update that breaks a page. There are no test cases to
+write or maintain. An advisory AI explorer (Gemini free tier, `GEMINI_API_KEY`
+secret) uses the app like a person for major and framework updates. Full
+guide, inputs and examples: [`docs/runtime-gate.md`](docs/runtime-gate.md).
+
+The Renovate presets set `platformAutomerge: false`, so Renovate itself checks
+that every status (this gate included) is green before it merges. GitHub's
+native auto-merge only waits for checks that branch protection or a ruleset
+makes required, and private repos on a free plan cannot require any, so there
+it would merge the moment the PR opened.
+
+```yaml
+jobs:
+  runtime:
+    uses: rishitank/.github/.github/workflows/runtime-gate.yml@<sha>
+    permissions: { contents: read, actions: read, pull-requests: write }
+    with:
+      mode: docker
+    secrets:
+      gemini-api-key: ${{ secrets.GEMINI_API_KEY }}
+```
 
 ## Security tooling, and what is deliberately absent
 

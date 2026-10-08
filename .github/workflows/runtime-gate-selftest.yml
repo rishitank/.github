@@ -1,0 +1,63 @@
+# Proves the runtime-gate toolkit still does its job whenever it changes:
+# the crawler passes a healthy site and catches every kind of breakage in a
+# broken one, the explorer harness runs end to end (fake model, no key), and
+# the reusable workflow itself boots and crawls a site through its real
+# static-serving path.
+name: runtime-gate-selftest
+
+on:
+  pull_request:
+    paths:
+      - .github/actions/runtime-gate/**
+      - .github/workflows/runtime-gate*.yml
+  push:
+    branches: [main]
+    paths:
+      - .github/actions/runtime-gate/**
+      - .github/workflows/runtime-gate*.yml
+  workflow_dispatch:
+
+concurrency:
+  group: runtime-gate-selftest-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  toolkit:
+    name: Toolkit self-test
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: .github/actions/runtime-gate
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version: current
+      - run: npm ci --no-audit --no-fund
+      - run: npx --no-install playwright install --with-deps --no-shell chromium
+      - run: npm test
+
+  workflow:
+    name: Reusable workflow end to end
+    uses: ./.github/workflows/runtime-gate.yml
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: write
+    with:
+      mode: static
+      setup: none
+      build: ""
+      static-dir: .github/actions/runtime-gate/test/fixtures/good
+      spa: false
+      port: 4173
+      explore: always
+      comment: false
