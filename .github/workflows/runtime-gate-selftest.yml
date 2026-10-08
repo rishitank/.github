@@ -61,3 +61,28 @@ jobs:
       port: 4173
       explore: always
       comment: false
+
+  # A dynamic app with sign-up and sign-in: proves the login inputs reach the
+  # crawler and the explorer through the real workflow, that the signed-in
+  # crawl passes on a healthy app, and that the explorer (fake model, so no
+  # key is needed) runs signed in, screens the injection page and records flows.
+  workflow-signed-in:
+    name: Reusable workflow end to end (signed in)
+    uses: ./.github/workflows/runtime-gate.yml
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: write
+    with:
+      mode: command
+      build: ""
+      start: node .github/actions/runtime-gate/test/fixtures/app-server.mjs 4174
+      port: 4174
+      login-path: /login
+      signup-path: /signup
+      login-username: selftest@example.com
+      login-password: ci-only-password-123
+      login-check: /dashboard
+      explore: always
+      explore-model: fake
+      comment: false

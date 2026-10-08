@@ -11,11 +11,21 @@
 #                          missing-route probe. Fails on uncaught exceptions,
 #                          console errors, failed same-origin requests, 4xx/5xx,
 #                          blank pages, framework crash screens.
+#                          With a test login it signs in and crawls again
+#                          behind the login. Replays the flows the explorer
+#                          recorded (blocking on dependency PRs). Errors that
+#                          do not recur on a clean retry are flaky, not
+#                          blocking; known ones can be quarantined. Reports
+#                          route/control/form/JS coverage vs the base branch.
 #   2. visual (advisory)   screenshots compared with the last default-branch run.
 #   3. explore (advisory)  Gemini uses the app like a person, by look and feel,
 #                          for major or framework updates, labelled PRs,
 #                          schedules and manual runs. Free tier; needs the
 #                          GEMINI_API_KEY secret, skips itself without it.
+#                          Every page is screened for prompt injection first,
+#                          and every action it asks for is validated. What it
+#                          does successfully is recorded as replayable flows;
+#                          runtime-gate-flows.yml saves them to the repo.
 #
 # Three ways to run the app (`mode`):
 #   command  install + build + start on the runner (optionally building inside
@@ -165,6 +175,42 @@ on:
         description: Fill forms with dummy data and submit them (never send/pay/delete ones).
         type: boolean
         default: true
+      login-path:
+        description: Sign-in page, e.g. /login. Turns on the signed-in crawl and a signed-in explorer.
+        type: string
+        default: ""
+      login-username:
+        description: Test account (CI-only dummy, created by `migrate` seed data or by signup-path).
+        type: string
+        default: ci@example.com
+      login-password:
+        description: Test account password. A CI-only dummy, never a real credential.
+        type: string
+        default: ""
+      signup-path:
+        description: Register the test account here first, for apps without seed data.
+        type: string
+        default: ""
+      login-check:
+        description: A path only signed-in users can open; proves the sign-in worked.
+        type: string
+        default: ""
+      login-script:
+        description: 'Repo module that signs in when a form will not do. Default export async ({ page, context, base, username, password }).'
+        type: string
+        default: ""
+      flows-strict:
+        description: auto (a recorded flow that can no longer be done blocks dependency-update PRs, warns on others), true or false.
+        type: string
+        default: auto
+      retry:
+        description: Re-open pages with blocking findings once; findings that do not recur are reported as flaky, not blocking.
+        type: boolean
+        default: true
+      quarantine:
+        description: 'Regexes for known problems to show but not block on, matched against "kind: message @ /path". Newline-separated; link an issue in a comment.'
+        type: string
+        default: ""
       http-user:
         description: Basic-auth user for a staging gate (dummy CI value).
         type: string
@@ -205,6 +251,10 @@ on:
       explore-steps:
         type: number
         default: 30
+      explore-guard:
+        description: Prompt-injection screening before the model sees a page - model (heuristics plus a small classifier), heuristic or off.
+        type: string
+        default: model
       comment:
         description: Post a sticky PR comment with the results.
         type: boolean
@@ -299,6 +349,13 @@ jobs:
           echo "explore=${explore}" >> "$GITHUB_OUTPUT"
           echo "Exploration: ${explore} (${reason})"
           echo "explore-reason=${reason}" >> "$GITHUB_OUTPUT"
+          # Dependency-update PRs: the UI should not change, so a recorded
+          # flow that stops working is a regression (flows-strict: auto).
+          deps=false
+          case "${PR_AUTHOR}" in renovate\[bot\]|dependabot\[bot\]|renovate-bot) deps=true ;; esac
+          case "${HEAD_REF}" in renovate/*|dependabot/*) deps=true ;; esac
+          echo "deps-pr=${deps}" >> "$GITHUB_OUTPUT"
+          echo "Dependency-update PR: ${deps}"
         env:
           NODE_VERSION_FILE: ${{ inputs.node-version-file }}
           INSTALL_INPUT: ${{ inputs.install }}
@@ -309,6 +366,8 @@ jobs:
           EVENT: ${{ github.event_name }}
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          HEAD_REF: ${{ github.head_ref }}
 
       - name: Install pnpm
         if: inputs.mode != 'docker' && inputs.build-image == '' && inputs.package-manager == 'pnpm'
@@ -443,7 +502,7 @@ jobs:
 
       - name: Start app (static)
         if: inputs.mode == 'static'
-        uses: rishitank/.github/.github/actions/runtime-gate@95576dc6546318e0b0d71bce15da200c142d6cac
+        uses: rishitank/.github/.github/actions/runtime-gate@715af0ee0d7198e02581641db2cc10492ae37707
         with:
           mode: serve
           serve-dir: ${{ inputs.working-directory }}/${{ inputs.static-dir }}
@@ -510,12 +569,12 @@ jobs:
           name: runtime-gate-baseline
           run-id: ${{ steps.baseline.outputs.run-id }}
           github-token: ${{ github.token }}
-          path: ${{ runner.temp }}/rg-baseline/screens
+          path: ${{ runner.temp }}/rg-baseline
 
       - name: Crawl
         id: crawl
         continue-on-error: true
-        uses: rishitank/.github/.github/actions/runtime-gate@95576dc6546318e0b0d71bce15da200c142d6cac
+        uses: rishitank/.github/.github/actions/runtime-gate@715af0ee0d7198e02581641db2cc10492ae37707
         with:
           mode: crawl
           url: ${{ env.RG_BASE }}
@@ -529,6 +588,17 @@ jobs:
           interact: ${{ inputs.interact }}
           interact-max: ${{ inputs.interact-max }}
           forms: ${{ inputs.forms }}
+          login-path: ${{ inputs.login-path }}
+          login-username: ${{ inputs.login-username }}
+          login-password: ${{ inputs.login-password }}
+          signup-path: ${{ inputs.signup-path }}
+          login-check: ${{ inputs.login-check }}
+          login-script: ${{ inputs.login-script }}
+          flows-file: ${{ inputs.working-directory }}/.github/runtime-gate-flows.json
+          flows-strict: ${{ inputs.flows-strict }}
+          deps-pr: ${{ steps.plan.outputs.deps-pr }}
+          retry: ${{ inputs.retry }}
+          quarantine: ${{ inputs.quarantine }}
           http-user: ${{ inputs.http-user }}
           http-password: ${{ inputs.http-password }}
           browser: ${{ inputs.browser }}
@@ -558,16 +628,23 @@ jobs:
       - name: Explore (AI, advisory)
         if: steps.plan.outputs.explore == 'true'
         continue-on-error: true
-        uses: rishitank/.github/.github/actions/runtime-gate@95576dc6546318e0b0d71bce15da200c142d6cac
+        uses: rishitank/.github/.github/actions/runtime-gate@715af0ee0d7198e02581641db2cc10492ae37707
         with:
           mode: explore
           url: ${{ env.RG_BASE }}
           out: ${{ env.RG_REPORT }}
           ignore: ${{ inputs.ignore }}
+          login-path: ${{ inputs.login-path }}
+          login-username: ${{ inputs.login-username }}
+          login-password: ${{ inputs.login-password }}
+          signup-path: ${{ inputs.signup-path }}
+          login-check: ${{ inputs.login-check }}
+          login-script: ${{ inputs.login-script }}
           http-user: ${{ inputs.http-user }}
           http-password: ${{ inputs.http-password }}
           browser: ${{ inputs.browser }}
           headed: ${{ inputs.headed }}
+          explore-guard: ${{ inputs.explore-guard }}
           gemini-api-key: ${{ secrets.gemini-api-key }}
           explore-model: ${{ inputs.explore-model }}
           explore-steps: ${{ inputs.explore-steps }}
@@ -596,13 +673,15 @@ jobs:
           retention-days: 14
           if-no-files-found: ignore
 
-      # The base branch's screenshots become the next PR's baseline.
+      # The base branch's screenshots and coverage become the next PR's baseline.
       - name: Upload baseline
         if: steps.crawl.outcome == 'success' && github.event_name != 'pull_request'
         uses: actions/upload-artifact@v7.0.1
         with:
           name: runtime-gate-baseline
-          path: ${{ env.RG_REPORT }}/screens
+          path: |
+            ${{ env.RG_REPORT }}/screens
+            ${{ env.RG_REPORT }}/crawl.json
           retention-days: 30
           if-no-files-found: ignore
 
