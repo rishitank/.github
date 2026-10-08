@@ -54,6 +54,9 @@ test('healthy site passes', () => {
   assert.ok(urls.includes('http://127.0.0.1:4711/hidden-from-nav'), 'pages listed only in sitemap.xml are visited');
   assert.ok(!urls.some((u) => u.includes('example.invalid')), 'external links are not followed');
   assert.ok(report.pages.filter((p) => p.url.includes('/items/')).length <= 3, 'at most 3 pages per URL shape');
+  const home = report.pages.find((p) => p.url === 'http://127.0.0.1:4711/');
+  assert.ok(home.clicked >= 5, `plain buttons, select, search and disclosures are exercised (clicked ${home.clicked})`);
+  assert.ok(!report.findings.some((f) => /destructive control was pressed/.test(f.message)), 'controls that read as destructive are never pressed');
 });
 
 test('broken site fails with every kind of breakage', () => {
@@ -65,6 +68,8 @@ test('broken site fails with every kind of breakage', () => {
     assert.ok(kinds.has(k), `expected a ${k} finding, got ${[...kinds].join(', ')}`);
   }
   assert.ok(report.findings.some((f) => /menu exploded/.test(f.message)), 'errors thrown by clicking a control are caught');
+  assert.ok(report.findings.some((f) => /undefinedFunctionCall/.test(f.message)), 'errors thrown by a plain button are caught');
+  assert.ok(report.findings.some((f) => /null/.test(f.message) && f.kind === 'uncaught-exception'), 'errors thrown by searching are caught');
 });
 
 test('ignore list tolerates a known console message', () => {

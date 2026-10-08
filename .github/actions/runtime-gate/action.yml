@@ -48,8 +48,14 @@ inputs:
     description: Repeat the first pages at phone size.
     default: "true"
   interact:
-    description: Click tabs, disclosures, menus and switches on each page.
+    description: >-
+      Operate each page's safe controls: buttons, tabs, disclosures, menus,
+      switches, checkboxes, selects and search boxes. Anything that submits a
+      form or reads as destructive (delete, pay, sign out, send...) is skipped.
     default: "true"
+  interact-max:
+    description: Most controls to operate per page.
+    default: "12"
   baseline-dir:
     description: A previous report directory to compare screenshots against.
     default: ""
@@ -192,6 +198,7 @@ runs:
         RG_PER_PATTERN: ${{ inputs.per-pattern }}
         RG_MOBILE: ${{ inputs.mobile }}
         RG_INTERACT: ${{ inputs.interact }}
+        RG_INTERACT_MAX: ${{ inputs.interact-max }}
         RG_BASELINE_DIR: ${{ inputs.baseline-dir }}
         RG_DIFF_THRESHOLD: ${{ inputs.diff-threshold }}
         RG_HTTP_USER: ${{ inputs.http-user }}

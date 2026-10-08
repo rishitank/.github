@@ -29,7 +29,7 @@ const PER_PATTERN = envInt('RG_PER_PATTERN', 3);
 const NAV_TIMEOUT = envInt('RG_NAV_TIMEOUT', 30000);
 const SETTLE = envInt('RG_SETTLE_MS', 750);
 const INTERACT = envBool('RG_INTERACT', true);
-const INTERACT_MAX = envInt('RG_INTERACT_MAX', 6);
+const INTERACT_MAX = envInt('RG_INTERACT_MAX', 12);
 const MOBILE = envBool('RG_MOBILE', true);
 const SCREENSHOTS = envBool('RG_SCREENSHOTS', true);
 const BASELINE = env('RG_BASELINE_DIR', '');
@@ -127,31 +127,71 @@ async function shoot(page, name) {
   }
 }
 
+// Words on a control that mean "this changes something real". The crawler
+// never presses those; the AI explorer, which understands context, may.
+const DESTRUCTIVE = /\b(delete|remove|destroy|erase|log ?out|sign ?out|unsubscribe|deactivate|pay|buy|purchase|checkout|check out|order|subscribe|send|submit|publish|reset|clear all|cancel (plan|subscription)|close account)\b/i;
+
+// Presses the page's safe, stateless controls the way a curious visitor
+// would: tabs, disclosures, menus, toggles, carousels, "show more" buttons,
+// checkboxes, selects, and a search box with a query. Anything that submits a
+// form or reads as destructive is skipped. Errors these interactions cause are
+// caught by the collector like any other.
 async function exercise(page, collector, url) {
   if (!INTERACT) return 0;
   const selector = [
     '[role="tab"]:not([aria-selected="true"])',
-    'button[aria-expanded]',
     'summary',
-    'button[aria-haspopup]',
+    'button',
+    '[role="button"]',
     '[role="switch"]',
+    '[role="menuitem"]',
+    'input[type="checkbox"]',
+    'input[type="radio"]',
+    'select',
+    'input[type="search"]',
+    '[role="searchbox"]',
   ].join(', ');
-  const handles = await page.locator(selector).all();
+  const count = await page.locator(selector).count().catch(() => 0);
+  const tried = new Set();
   let clicked = 0;
-  for (const el of handles) {
-    if (clicked >= INTERACT_MAX) break;
+  for (let i = 0; i < count && clicked < INTERACT_MAX; i += 1) {
+    const el = page.locator(selector).nth(i);
     try {
-      if (!(await el.isVisible())) continue;
-      const submit = await el.evaluate((n) => !!n.closest('form') && (n.getAttribute('type') || 'submit') === 'submit' && n.tagName === 'BUTTON');
-      if (submit) continue;
-      await el.click({ timeout: 3000 });
+      if (!(await el.isVisible()) || !(await el.isEnabled())) continue;
+      const info = await el.evaluate((n) => ({
+        tag: n.tagName,
+        type: (n.getAttribute('type') || '').toLowerCase(),
+        role: n.getAttribute('role') || '',
+        inForm: !!n.closest('form'),
+        label: (n.getAttribute('aria-label') || n.textContent || n.getAttribute('title') || n.getAttribute('name') || '').trim().replace(/\s+/g, ' ').slice(0, 80),
+      }));
+      const key = `${info.tag}|${info.role}|${info.label}`;
+      if (tried.has(key)) continue;
+      tried.add(key);
+      if (DESTRUCTIVE.test(info.label)) continue;
+      // A <button> inside a form submits it unless it says otherwise.
+      if (info.tag === 'BUTTON' && info.inForm && (info.type === '' || info.type === 'submit')) continue;
+      if (info.tag === 'INPUT' && info.type === 'submit') continue;
+      if (info.tag === 'SELECT') {
+        const options = await el.locator('option').count();
+        if (options > 1) await el.selectOption({ index: 1 }, { timeout: 3000 });
+      } else if (info.type === 'search' || info.role === 'searchbox') {
+        await el.fill('test', { timeout: 3000 });
+        await el.press('Enter', { timeout: 3000 });
+      } else {
+        await el.click({ timeout: 3000 });
+      }
       clicked += 1;
-      await page.waitForTimeout(250);
+      await page.waitForTimeout(300);
       await page.keyboard.press('Escape').catch(() => {});
+      // Close anything the control opened in a new tab, and come back if it
+      // navigated, so the rest of the page still gets its turn.
+      for (const other of page.context().pages()) if (other !== page) await other.close().catch(() => {});
       if (normalise(page.url()) !== url) {
         await page.goto(url, { waitUntil: 'load', timeout: NAV_TIMEOUT }).catch(() => {});
+        await settle(page);
       }
-    } catch { /* an element that cannot be clicked is not an app error */ }
+    } catch { /* a control that cannot be operated is not an app error */ }
   }
   return clicked;
 }

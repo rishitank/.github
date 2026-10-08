@@ -5,5 +5,9 @@
 <p id="p">One</p>
 <details><summary>More</summary><p>Hidden detail</p></details>
 <button aria-expanded="false" onclick="this.setAttribute('aria-expanded','true')">Menu</button>
+<button onclick="document.getElementById('p').textContent='More'">Show more</button>
+<button onclick="throw new Error('destructive control was pressed')">Delete account</button>
+<select onchange="document.title=this.value"><option>a</option><option>b</option></select>
+<input type="search" aria-label="Search site" onkeydown="if(event.key==='Enter'){document.getElementById('p').textContent='searched'}">
 <form><input name="q"><button type="submit">Search</button></form>
 </body></html>

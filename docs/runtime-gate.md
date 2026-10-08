@@ -26,7 +26,10 @@ opens each page in the full Chromium browser in new headless mode, which is
 the same engine people use rather than Playwright's stripped-down shell. Then
 it:
 
-- clicks tabs, disclosures, menus and switches;
+- operates up to 12 safe controls per page: buttons, tabs, disclosures,
+  menus, switches, checkboxes and selects, and types a query into search
+  boxes. It never presses anything that submits a form or reads as
+  destructive (delete, pay, sign out, send and similar);
 - follows links client-side, so routing and hydration run as they do for a
   person;
 - probes a missing route;
@@ -113,6 +116,9 @@ Two inputs apply across modes:
   still run on the runner.
 - **`postgres: "17"`**: starts Postgres and exports `DATABASE_URL`. Use
   `migrate` to run migrations and seed data before start.
+
+In `docker` mode, `env` reaches the running container only. Values the image
+needs at build time, such as `NEXT_PUBLIC_*`, go in `docker-build-args`.
 
 Everything in `env` must be a CI-only dummy value. The gate never needs real
 credentials, and an app that can't boot without them should get a fake or
