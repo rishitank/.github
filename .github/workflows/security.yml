@@ -18,8 +18,9 @@ on:
         type: string
         default: none
       runs-on:
+        description: Empty follows the CI_RUNNER variable, then ubuntu-latest.
         type: string
-        default: ubuntu-latest
+        default: ""
       osv:
         type: boolean
         default: true
@@ -69,7 +70,7 @@ jobs:
   dependencies:
     name: Vulnerable dependencies
     if: inputs.osv
-    runs-on: ${{ inputs.runs-on }}
+    runs-on: ${{ inputs.runs-on || vars.CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       contents: read
@@ -87,7 +88,7 @@ jobs:
   secrets:
     name: Secrets
     if: inputs.gitleaks
-    runs-on: ${{ inputs.runs-on }}
+    runs-on: ${{ inputs.runs-on || vars.CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       contents: read
@@ -125,7 +126,7 @@ jobs:
   audit:
     name: Ecosystem audit
     if: inputs.ecosystem != 'none'
-    runs-on: ${{ inputs.runs-on }}
+    runs-on: ${{ inputs.runs-on || vars.CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       contents: read
