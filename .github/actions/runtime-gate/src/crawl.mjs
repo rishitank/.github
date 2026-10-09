@@ -19,6 +19,7 @@
 // overflow and visual changes are reported but never fail it.
 import fs from 'node:fs';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { devices } from 'playwright';
 import { PNG } from 'pngjs';
 import pixelmatch from 'pixelmatch';
@@ -259,6 +260,7 @@ async function submitForms(page, collector, url, { signedIn = false } = {}) {
         : '';
       if (FORM_SKIP.test(label)) continue;
       const fields = await form.locator('input, textarea, select').all();
+      const typed = [];
       for (const el of fields) {
         const f = await el.evaluate((n) => ({
           tag: n.tagName, type: (n.getAttribute('type') || 'text').toLowerCase(), name: n.getAttribute('name') || '',
@@ -274,22 +276,26 @@ async function submitForms(page, collector, url, { signedIn = false } = {}) {
           if (f.required) await el.check({ timeout: 2000 });
         } else if (f.tag === 'TEXTAREA') {
           await el.fill('Runtime gate test message', { timeout: 2000 });
+          typed.push('Runtime gate test message');
         } else {
-          await el.fill(dummyFor(f), { timeout: 2000 });
+          const value = dummyFor(f);
+          await el.fill(value, { timeout: 2000 });
+          typed.push(value);
         }
       }
-      collector.expectClientErrors = true;
-      if (await submit.count()) {
-        if (!(await submit.isEnabled())) { collector.expectClientErrors = false; continue; }
-        await submit.click({ timeout: 3000 });
-      } else {
-        await form.evaluate((n) => n.requestSubmit());
-      }
+      if ((await submit.count()) && !(await submit.isEnabled())) continue;
+      // Only the requests this submission sends count as answering it (see
+      // Collector.ownsRequest); anything else in the same window is judged
+      // as usual.
+      const action = await form.evaluate((n) => (n.getAttribute('action') ? new URL(n.getAttribute('action'), document.baseURI).href : '')).catch(() => '');
+      collector.beginSubmission(page, { action, values: typed });
+      if (await submit.count()) await submit.click({ timeout: 3000 });
+      else await form.evaluate((n) => n.requestSubmit());
       submitted += 1;
       submittedThis = true;
       await settle(page);
     } catch { /* a form that cannot be filled is not an app error */ } finally {
-      collector.expectClientErrors = false;
+      collector.endSubmission();
     }
     for (const other of page.context().pages()) if (other !== page) await other.close().catch(() => {});
     // Always load the page afresh after a submission, even when the URL did
@@ -916,7 +922,9 @@ export function renderMarkdown(r) {
   return lines.join('\n');
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+// Compare file URLs, not strings: import.meta.url is percent-encoded and has
+// symlinks resolved, process.argv[1] is neither.
+if (process.argv[1] && import.meta.url === pathToFileURL(fs.realpathSync(process.argv[1])).href) {
   // Exit explicitly: an exception that leaves the browser open must not hang
   // the job until its timeout.
   main().then(() => process.exit(process.exitCode ?? 0), (err) => {
