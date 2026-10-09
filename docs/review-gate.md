@@ -25,11 +25,16 @@ repository carries a `review-gate` ruleset that requires:
 ## Commands that would defeat the gate
 
 Anyone who can comment on a PR can run these, including an agent working
-with the owner's token. They skip the loop, so agents never use them:
+with the owner's token. They skip the loop, so agents never use them. With
+the Request Changes Workflow on, CodeRabbit documents both as explicit
+overrides that can submit an approval without a completed review of the
+latest commit and without passing pre-merge checks
+([docs](https://docs.coderabbit.ai/pr-reviews/request-changes-workflow)):
 
 - `@coderabbitai approve` resolves every thread and approves in one step,
   whether or not anything was fixed.
-- `@coderabbitai resolve` marks every CodeRabbit comment resolved.
+- `@coderabbitai resolve` marks every CodeRabbit comment resolved, and can
+  submit an approval too.
 
 If CodeRabbit is wrong about something, reply in the thread and say why. It
 resolves the thread itself when it agrees.
@@ -42,8 +47,12 @@ resolves the thread itself when it agrees.
   (Dependabot, say), the owner's approval also counts.
 - **CodeRabbit won't review bot PRs** ("bot user not eligible"), so Dependabot
   PRs need the owner's approval.
-- **The `CodeRabbit` status isn't proof of review.** It turns green when a
-  review is skipped or rate limited too. The approval is the proof.
+- **Neither the `CodeRabbit` status nor an approval alone proves a review.**
+  The status turns green when a review is skipped or rate limited too, and
+  `approve` or `resolve` (above) can produce an approval with no completed
+  review. The evidence is a completed CodeRabbit review of the current head
+  commit (its review lists the commits it covered) with no open thread, and
+  no `approve` or `resolve` command in the PR's comments.
 - **Private repositories need GitHub Pro** for rulesets. On Free, only public
   repositories can carry the gate.
 - **An admin token can still edit or delete a ruleset.** The gate stops merges,
