@@ -19,11 +19,6 @@
 name: branch-prune
 
 on:
-  # TEMPORARY, removed in the next commit: registers this workflow so it can
-  # be dispatched before it reaches main, and proves the no-token path.
-  pull_request:
-    paths:
-      - .github/workflows/branch-prune.yml
   schedule:
     - cron: "17 4 * * *"
   workflow_dispatch:
