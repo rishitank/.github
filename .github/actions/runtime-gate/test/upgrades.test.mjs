@@ -14,22 +14,30 @@ import { FlowRecorder, mergeFlows } from '../src/flows.mjs';
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, '..');
 const servers = [];
-const GOOD = 'http://127.0.0.1:4821';
-const BROKEN = 'http://127.0.0.1:4822';
-const FLAKY = 'http://127.0.0.1:4823';
-const FRESH = 'http://127.0.0.1:4825'; // no crawl has registered anyone here yet
+let GOOD = '';
+let BROKEN = '';
+let FLAKY = '';
+let FRESH = ''; // no crawl has registered anyone here yet
 
-function app(port, ...flags) {
-  servers.push(spawn(process.execPath, [path.join(here, 'fixtures/app-server.mjs'), String(port), ...flags], { stdio: 'ignore' }));
+// Starts a server on a free port (port 0) and resolves with its base URL once
+// it prints the port it listens on, so no test can reach a foreign process on
+// a fixed port. Fails fast if the server exits first.
+function start(script, args) {
+  const p = spawn(process.execPath, [script, ...args], { stdio: ['ignore', 'pipe', 'inherit'] });
+  servers.push(p);
+  return new Promise((resolve, reject) => {
+    let out = '';
+    const timer = setTimeout(() => reject(new Error(`${path.basename(script)} did not start: ${out}`)), 10000);
+    p.stdout.on('data', (d) => {
+      out += d;
+      const m = out.match(/ on :(\d+)/);
+      if (m) { clearTimeout(timer); resolve(`http://127.0.0.1:${m[1]}`); }
+    });
+    p.on('exit', (code) => { clearTimeout(timer); reject(new Error(`${path.basename(script)} exited (${code}) before listening: ${out}`)); });
+  });
 }
 
-async function waitFor(url) {
-  for (let i = 0; i < 50; i += 1) {
-    try { if ((await fetch(url)).status) return; } catch { /* not yet */ }
-    await new Promise((r) => setTimeout(r, 100));
-  }
-  throw new Error(`server at ${url} did not start`);
-}
+const app = (...flags) => start(path.join(here, 'fixtures/app-server.mjs'), ['0', ...flags]);
 
 function run(script, env) {
   const out = fs.mkdtempSync(path.join(os.tmpdir(), 'rg-'));
@@ -46,11 +54,7 @@ function run(script, env) {
 const LOGIN = { RG_LOGIN_PATH: '/login', RG_LOGIN_USERNAME: 'tester@example.com', RG_LOGIN_PASSWORD: 'ci-only-password-123', RG_SIGNUP_PATH: '/signup', RG_LOGIN_CHECK: '/dashboard' };
 
 before(async () => {
-  app(4821);
-  app(4822, 'broken');
-  app(4823);
-  app(4825);
-  await Promise.all([GOOD, BROKEN, FLAKY, FRESH].map((u) => waitFor(`${u}/`)));
+  [GOOD, BROKEN, FLAKY, FRESH] = await Promise.all([app(), app('broken'), app(), app()]);
 });
 
 after(() => { for (const p of servers) p.kill(); });
@@ -157,6 +161,18 @@ test('a sign-in that does not work is a blocking finding', () => {
   assert.ok(r.report.findings.some((f) => f.kind === 'login-failed' && f.blocking));
 });
 
+test('a rejected sign-in that leaves a two-password form on the sign-in page is not success', () => {
+  // No login-check: success rests on the credential form being gone. A form
+  // with a password and a masked security code must still count as "there".
+  const r = run('crawl.mjs', { RG_URL: GOOD, RG_LOGIN_PATH: '/login-code', RG_LOGIN_USERNAME: 'nobody@example.com', RG_LOGIN_PASSWORD: 'wrong-password', RG_INTERACT: 'false', RG_FORMS: 'false', RG_RETRY: 'false' });
+  assert.equal(r.status, 1, r.log);
+  assert.equal(r.report.coverage.signIn.status, 'failed', JSON.stringify(r.report.coverage.signIn));
+  assert.ok(r.report.findings.some((f) => f.kind === 'login-failed' && f.blocking));
+
+  const ok = run('crawl.mjs', { RG_URL: GOOD, RG_LOGIN_PATH: '/login-code', RG_LOGIN_USERNAME: 'seeded@example.com', RG_LOGIN_PASSWORD: 'seeded-password-123', RG_INTERACT: 'false', RG_FORMS: 'false', RG_RETRY: 'false' });
+  assert.equal(ok.report.coverage.signIn.status, 'signed in', JSON.stringify(ok.report.coverage.signIn));
+});
+
 test('an error that does not happen again on a clean retry is reported as flaky, not blocking', () => {
   const r = run('crawl.mjs', { RG_URL: FLAKY, RG_ROUTES: '/flaky', RG_INTERACT: 'false', RG_FORMS: 'false' });
   assert.equal(r.status, 0, r.log);
@@ -212,11 +228,9 @@ test('explorer withholds a page that tries to instruct the AI, signs in first, a
 test('explorer records successful steps as replayable flows', () => {
   // The static fixture has no injection: the fake model clicks three links.
   const out = fs.mkdtempSync(path.join(os.tmpdir(), 'rg-'));
-  const p = spawn(process.execPath, [path.join(root, 'src/static-server.mjs'), path.join(here, 'fixtures/good'), '4824'], { stdio: 'ignore' });
-  servers.push(p);
-  return waitFor('http://127.0.0.1:4824/').then(() => {
+  return start(path.join(root, 'src/static-server.mjs'), [path.join(here, 'fixtures/good'), '0']).then((url) => {
     const res = spawnSync(process.execPath, [path.join(root, 'src/explore.mjs')], {
-      env: { ...process.env, RG_OUT: out, RG_URL: 'http://127.0.0.1:4824', RG_EXPLORE_MODEL: 'fake', RG_EXPLORE_RPM: '600' },
+      env: { ...process.env, RG_OUT: out, RG_URL: url, RG_EXPLORE_MODEL: 'fake', RG_EXPLORE_RPM: '600' },
       encoding: 'utf8', timeout: 120000,
     });
     assert.equal(res.status, 0, res.stderr);
