@@ -1,0 +1,68 @@
+# Deletes a pull request's head branch once the PR has been merged.
+#
+# Why a workflow and not a setting:
+# - GitHub has no account-wide "delete head branches" setting. It is a
+#   per-repository toggle that is easy to miss on new repos, and it deletes
+#   every merged head branch without exception.
+# - Private repositories on the Free plan cannot protect branches, so nothing
+#   stops that toggle from deleting a long-lived branch such as `develop` when
+#   it is merged as the head of a PR.
+# - So this keeps an explicit allowlist instead: the default branch, main,
+#   master, develop, staging, test, gh-pages, deploy-* and release/* are never
+#   deleted, and neither is a branch that an open PR still uses as its base.
+#
+# Self-contained on purpose (no reusable workflow), and it only acts on
+# same-repository heads, never on a fork's branch.
+name: branch-cleanup
+
+on:
+  pull_request:
+    types: [closed]
+
+permissions: {}
+
+jobs:
+  delete-merged-branch:
+    if: github.event.pull_request.merged == true && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      contents: write
+      pull-requests: read
+    steps:
+      - name: Delete the merged head branch
+        env:
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          if [ "$HEAD_REF" = "$DEFAULT_BRANCH" ]; then
+            echo "::notice::Keeping $HEAD_REF: it is the default branch."
+            exit 0
+          fi
+
+          case "$HEAD_REF" in
+            main | master | develop | staging | test | gh-pages | deploy-* | release/*)
+              echo "::notice::Keeping $HEAD_REF: it is on the long-lived branch allowlist."
+              exit 0
+              ;;
+          esac
+
+          children="$(gh pr list --repo "$REPO" --base "$HEAD_REF" --state open --json number --jq length)"
+          if [ "$children" -gt 0 ]; then
+            echo "::notice::Keeping $HEAD_REF: $children open PR(s) use it as their base."
+            exit 0
+          fi
+
+          ref="$(jq -rn --arg r "$HEAD_REF" '$r|@uri')"
+          if out="$(gh api -X DELETE "repos/$REPO/git/refs/heads/$ref" 2>&1)"; then
+            echo "Deleted branch $HEAD_REF."
+          elif printf '%s' "$out" | grep -Eq 'Reference does not exist|HTTP 404'; then
+            echo "::notice::Branch $HEAD_REF was already deleted."
+          else
+            printf '%s\n' "$out" >&2
+            exit 1
+          fi
