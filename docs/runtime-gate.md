@@ -308,7 +308,12 @@ The explorer reads this file as operator instructions.
   explorer can't sign itself out. Recorded flows are validated the same way
   when they are replayed.
 - **The Gemini key is scoped to one step.** It goes only to the explorer
-  step. The app, its dependencies and the build never see it.
+  step, never to the install, build, migrate or start commands. In `command`
+  and `static` modes the app (and anything its install left running) is
+  still running as the same user on the same runner while the explorer
+  runs, so it could read the key from the explorer's process. Use a key
+  that is good for nothing but the Gemini API. In `docker` mode the app runs
+  in its own container and cannot.
 - **The AI never decides pass/fail.** Its findings are advisory. Only the
   deterministic crawl blocks merges.
 
