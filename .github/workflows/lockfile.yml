@@ -30,8 +30,9 @@ on:
         type: string
         default: ""
       runs-on:
+        description: Empty follows the CI_RUNNER variable, then ubuntu-latest.
         type: string
-        default: ubuntu-latest
+        default: ""
       verify:
         description: Command proving the regenerated lockfile actually installs and builds.
         type: string
@@ -46,7 +47,7 @@ permissions:
 jobs:
   lockfile:
     name: Regenerate lockfile
-    runs-on: ${{ inputs.runs-on }}
+    runs-on: ${{ inputs.runs-on || vars.CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       contents: write

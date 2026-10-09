@@ -15,8 +15,9 @@ on:
         type: string
         default: stable
       runs-on:
+        description: Empty follows the CI_RUNNER variable, then ubuntu-latest.
         type: string
-        default: ubuntu-latest
+        default: ""
       working-directory:
         type: string
         default: "."
@@ -47,7 +48,7 @@ permissions:
 jobs:
   verify:
     name: Verify
-    runs-on: ${{ inputs.runs-on }}
+    runs-on: ${{ inputs.runs-on || vars.CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       contents: read

@@ -14,8 +14,9 @@ on:
   workflow_call:
     inputs:
       runs-on:
+        description: Empty follows the CI_RUNNER variable, then ubuntu-latest.
         type: string
-        default: ubuntu-latest
+        default: ""
       fallback-version:
         description: Used only if the GitHub API cannot be reached.
         type: string
@@ -34,7 +35,7 @@ permissions:
 jobs:
   actionlint:
     name: actionlint
-    runs-on: ${{ inputs.runs-on }}
+    runs-on: ${{ inputs.runs-on || vars.CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       contents: read
