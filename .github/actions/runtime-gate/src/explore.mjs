@@ -24,6 +24,7 @@
 // replays them on every PR without any model calls.
 import fs from 'node:fs';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import {
   Collector, buildIgnoreList, contextOptions, ensureDir, env, envInt, envList,
   launchBrowser, mdEscape, sameOrigin, sleep, writeJson,
@@ -201,7 +202,9 @@ async function main() {
   // signed-in session it was given.
   await context.route('**/*', (route) => {
     const req = route.request();
-    const main = req.isNavigationRequest() && req.frame() === req.frame().page().mainFrame();
+    let main = false;
+    // Service-worker requests have no frame, and req.frame() throws for them.
+    try { main = req.isNavigationRequest() && req.frame() === req.frame().page().mainFrame(); } catch { /* not a page navigation */ }
     if (main && !sameOrigin(req.url(), BASE)) return route.abort('blockedbyclient');
     if (main && signedIn && SIGN_OUT.test(new URL(req.url()).pathname.replace(/[-_]/g, ' '))) return route.abort('blockedbyclient');
     return route.continue();
@@ -346,7 +349,9 @@ export function renderMarkdown(r) {
   return lines.join('\n');
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+// Compare file URLs, not strings: import.meta.url is percent-encoded and has
+// symlinks resolved, process.argv[1] is neither.
+if (process.argv[1] && import.meta.url === pathToFileURL(fs.realpathSync(process.argv[1])).href) {
   main().then(() => process.exit(0), (err) => {
     // Advisory: a broken explorer must never fail the build. Exit explicitly
     // so a browser left open by the failure cannot hang the job.

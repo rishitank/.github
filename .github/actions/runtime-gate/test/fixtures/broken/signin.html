@@ -1,0 +1,2 @@
+<!doctype html><html><head><title>Sign in</title></head><body><a href="/">Home</a><h1>Sign in</h1>
+<form onsubmit="event.preventDefault(); fetch('/api/session',{method:'POST',body:new FormData(this)}); setTimeout(function(){fetch('/api/notifications?since=1')},150)"><label for="e">Email</label><input id="e" type="email" name="email" required><label for="pw">Password</label><input id="pw" type="password" name="password" required><button type="submit">Sign in</button></form></body></html>

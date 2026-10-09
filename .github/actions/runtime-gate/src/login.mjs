@@ -110,7 +110,7 @@ async function fillAndSubmit(page, scope, collector, { username, password, every
   const submit = scope.locator('button[type="submit"], button:not([type]), input[type="submit"]').first();
   // A 4xx answering this form (an existing account, a wrong password) is
   // expected and only a warning; other requests are judged as usual.
-  const action = await scope.evaluate((n) => (n.tagName === 'FORM' ? n.action : '')).catch(() => '');
+  const action = await scope.evaluate((n) => (n.tagName === 'FORM' && n.getAttribute('action') ? new URL(n.getAttribute('action'), document.baseURI).href : '')).catch(() => '');
   collector.beginSubmission(page, { action, values: typed });
   try {
     if ((await submit.count()) && (await submit.isVisible())) await submit.click({ timeout: 5000 });
