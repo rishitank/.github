@@ -72,8 +72,9 @@ on:
         type: boolean
         default: true
       runs-on:
+        description: Empty follows the CI_RUNNER variable, then ubuntu-latest.
         type: string
-        default: ubuntu-latest
+        default: ""
       timeout-minutes:
         type: number
         default: 15
@@ -84,7 +85,7 @@ permissions:
 jobs:
   lighthouse:
     name: Lighthouse CI
-    runs-on: ${{ inputs.runs-on }}
+    runs-on: ${{ inputs.runs-on || vars.CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       contents: read
