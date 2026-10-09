@@ -33,8 +33,12 @@ it:
 - fills up to 3 forms per page with dummy data and submits them, the way a
   person trying the app would. It skips forms whose button says send, pay,
   delete and the like. A 4xx answer to a dummy submission, such as a
-  rejected sign-in, is expected and only reported as a warning; exceptions,
-  console errors and 5xx responses still fail;
+  rejected sign-in, is expected and only reported as a warning. Only the
+  requests that submission sends count: the navigation it causes, a
+  non-GET fetch/XHR, or a fetch/XHR to the form's action or carrying a value
+  typed into it. Other requests in the same moment (polling, lazy chunks)
+  are judged as usual, and exceptions, console errors and 5xx responses
+  still fail;
 - follows links client-side, so routing and hydration run as they do for a
   person;
 - probes a missing route;
@@ -60,7 +64,7 @@ reached (see [Coverage](#coverage)).
 **AI explorer.** Gemini uses the app the way a person would. It reads the
 accessibility tree, looks at a screenshot after every action, fills forms
 with fake data, and reports anything that looks or behaves wrong. Runtime
-errors that happen while it explores are recorded deterministically, as hard
+errors that occur while it explores are recorded deterministically, as hard
 evidence alongside its opinion.
 
 The PR gets one sticky comment with all three results. The `runtime-gate`
@@ -109,6 +113,12 @@ jobs:
 Make the `Runtime gate` job a required check, or add it to the repo's
 `ci-gate` `needs`. Renovate then cannot auto-merge an update that breaks
 the running app.
+
+The caller must grant `pull-requests: write` even if it sets `comment: false`:
+GitHub rejects a run at startup when a called job declares a scope the caller
+does not grant. That scope is used only by the separate `Runtime gate comment`
+job, which downloads the report and posts it; the job that builds and runs the
+app has read-only permissions.
 
 ### Choosing a mode
 
@@ -165,8 +175,14 @@ run. Get a key from Google AI Studio and store it as the `GEMINI_API_KEY`
 secret. Without the secret the explorer reports itself skipped and the crawl
 still gates.
 
-For UK users, Google applies its paid-service data terms even to free-quota
-usage, so prompts are not used for training.
+How Google may use what the explorer sends (page text and screenshots) is
+set by the [Gemini API Additional Terms of Service](https://ai.google.dev/gemini-api/terms),
+section "How Google Uses Your Data". At the time of writing they apply the
+paid-service terms (prompts and responses not used to improve Google's
+products) to all usage from the UK, EEA and Switzerland, including free
+quota; elsewhere, free-tier content may be used to improve Google's products.
+Check the current terms before pointing the explorer at an app whose content
+must not leave your control, and use a paid-tier key if in doubt.
 
 ### Signed in
 
@@ -186,9 +202,12 @@ dependency update breaks sign-in, that is what the gate is for.
 
 The gate signs in before the signed-out crawl starts, because that crawl
 fills sign-up forms with its own dummy address (`ci@example.com`) and could
-otherwise claim the test account's address first. A `login-check` page may
-contain a change-password form: only a form with a single password field
-counts as "still on the sign-in page".
+otherwise claim the test account's address first. Without `login-check`,
+any password field left on the sign-in page after submitting means the
+sign-in failed (some sign-in forms have a second masked field, such as a
+security code); elsewhere, only a form with a single password field counts as
+"still on the sign-in page", so a `login-check` page may contain a
+change-password form.
 
 The signed-in crawl skips public pages that already rendered fine for a
 visitor, never opens sign-out links, and never submits a form with a password

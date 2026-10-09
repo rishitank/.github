@@ -279,19 +279,22 @@ jobs:
     name: Runtime gate
     runs-on: ${{ inputs.runs-on || vars.CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
+    # No write scope here: this job runs the app's install, build, migrate
+    # and start, i.e. dependency code under test. The PR comment is posted by
+    # the separate `comment` job below, which runs none of it.
     permissions:
       contents: read
       # Reading the base branch's last run for the visual baseline.
       actions: read
-      # The sticky comment. The caller's grant is the ceiling.
-      pull-requests: write
+    outputs:
+      explore-reason: ${{ steps.plan.outputs.explore-reason }}
     env:
       RG_PORT: ${{ inputs.port }}
       RG_BASE: http://127.0.0.1:${{ inputs.port }}
       RG_REPORT: ${{ github.workspace }}/runtime-gate-report
       RG_WD: ${{ inputs.working-directory }}
     steps:
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -371,25 +374,25 @@ jobs:
 
       - name: Install pnpm
         if: inputs.mode != 'docker' && inputs.build-image == '' && inputs.package-manager == 'pnpm'
-        uses: pnpm/action-setup@v6.0.10
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
         with:
           version: ${{ inputs.pnpm-version }}
           package_json_file: ${{ inputs.working-directory }}/package.json
 
       - name: Install Bun
         if: inputs.mode != 'docker' && inputs.build-image == '' && (inputs.setup == 'bun' || inputs.package-manager == 'bun')
-        uses: oven-sh/setup-bun@v2.2.0
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
 
       - name: Set up Node
         if: inputs.mode != 'docker' && inputs.build-image == '' && (inputs.setup == 'node' || inputs.setup == 'bun')
-        uses: actions/setup-node@v7.0.0
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: ${{ steps.plan.outputs.node-file }}
           node-version: ${{ steps.plan.outputs.node-file == '' && inputs.node-version || '' }}
 
       - name: Set up Python
         if: inputs.mode != 'docker' && inputs.build-image == '' && inputs.setup == 'python'
-        uses: actions/setup-python@v7.0.0
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ inputs.python-version }}
 
@@ -502,7 +505,7 @@ jobs:
 
       - name: Start app (static)
         if: inputs.mode == 'static'
-        uses: rishitank/.github/.github/actions/runtime-gate@1064cf0fcb847ed346a02964ec4bc432bfad3202
+        uses: rishitank/.github/.github/actions/runtime-gate@9842c78a4caec4d9a5ae2305533175a5c6cee0f9
         with:
           mode: serve
           serve-dir: ${{ inputs.working-directory }}/${{ inputs.static-dir }}
@@ -539,7 +542,7 @@ jobs:
         id: baseline
         if: inputs.visual-diff && github.event_name == 'pull_request'
         continue-on-error: true
-        uses: actions/github-script@v9.0.0
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |
             // The caller's workflow file, e.g. ".github/workflows/ci.yml".
@@ -564,7 +567,7 @@ jobs:
       - name: Download the visual baseline
         if: steps.baseline.outputs.run-id != ''
         continue-on-error: true
-        uses: actions/download-artifact@v8.0.2
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: runtime-gate-baseline
           run-id: ${{ steps.baseline.outputs.run-id }}
@@ -574,7 +577,7 @@ jobs:
       - name: Crawl
         id: crawl
         continue-on-error: true
-        uses: rishitank/.github/.github/actions/runtime-gate@1064cf0fcb847ed346a02964ec4bc432bfad3202
+        uses: rishitank/.github/.github/actions/runtime-gate@9842c78a4caec4d9a5ae2305533175a5c6cee0f9
         with:
           mode: crawl
           url: ${{ env.RG_BASE }}
@@ -628,7 +631,7 @@ jobs:
       - name: Explore (AI, advisory)
         if: steps.plan.outputs.explore == 'true'
         continue-on-error: true
-        uses: rishitank/.github/.github/actions/runtime-gate@1064cf0fcb847ed346a02964ec4bc432bfad3202
+        uses: rishitank/.github/.github/actions/runtime-gate@9842c78a4caec4d9a5ae2305533175a5c6cee0f9
         with:
           mode: explore
           url: ${{ env.RG_BASE }}
@@ -666,7 +669,7 @@ jobs:
 
       - name: Upload report
         if: always()
-        uses: actions/upload-artifact@v7.0.1
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: runtime-gate
           path: ${{ env.RG_REPORT }}
@@ -676,7 +679,7 @@ jobs:
       # The base branch's screenshots and coverage become the next PR's baseline.
       - name: Upload baseline
         if: steps.crawl.outcome == 'success' && github.event_name != 'pull_request'
-        uses: actions/upload-artifact@v7.0.1
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: runtime-gate-baseline
           path: |
@@ -684,31 +687,6 @@ jobs:
             ${{ env.RG_REPORT }}/crawl.json
           retention-days: 30
           if-no-files-found: ignore
-
-      - name: Comment on PR
-        if: always() && inputs.comment && github.event_name == 'pull_request'
-        # Fork and Dependabot PRs get a read-only token; losing the comment
-        # must not change the verdict.
-        continue-on-error: true
-        uses: actions/github-script@v9.0.0
-        env:
-          REPORT: ${{ env.RG_REPORT }}
-          CRAWL: ${{ steps.crawl.outcome }}
-          EXPLORE_REASON: ${{ steps.plan.outputs.explore-reason }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        with:
-          script: |
-            const fs = require('fs');
-            const read = (f) => (fs.existsSync(`${process.env.REPORT}/${f}`) ? fs.readFileSync(`${process.env.REPORT}/${f}`, 'utf8') : '');
-            const crawl = read('crawl.md') || `### ❌ Runtime crawl did not produce a report\n\nThe app may not have started. See the [run log](${process.env.RUN_URL}).`;
-            const explore = read('explore.md') || `_AI explorer not run: ${process.env.EXPLORE_REASON}. Add the \`ai-explore\` label to request one._`;
-            const marker = '<!-- runtime-gate-report -->';
-            let body = [marker, '## 🧪 Runtime gate', '', crawl, '', explore, '', `Screenshots, diffs and the app log: [runtime-gate artifact](${process.env.RUN_URL}).`].join('\n');
-            if (body.length > 60000) body = `${body.slice(0, 60000)}\n\n… truncated, full report in the artifact.`;
-            const { data: comments } = await github.rest.issues.listComments({ owner: context.repo.owner, repo: context.repo.repo, issue_number: context.issue.number, per_page: 100 });
-            const existing = comments.find((c) => c.body && c.body.includes(marker));
-            if (existing) await github.rest.issues.updateComment({ owner: context.repo.owner, repo: context.repo.repo, comment_id: existing.id, body });
-            else await github.rest.issues.createComment({ owner: context.repo.owner, repo: context.repo.repo, issue_number: context.issue.number, body });
 
       - name: Stop app
         if: always()
@@ -726,3 +704,46 @@ jobs:
           fi
         env:
           CRAWL: ${{ steps.crawl.outcome }}
+
+  # The sticky PR comment, in its own job so the token that can write to the
+  # PR never shares a job with the app or its dependencies. It only downloads
+  # the report artifact and reads it as text.
+  comment:
+    name: Runtime gate comment
+    needs: runtime
+    if: ${{ !cancelled() && inputs.comment && github.event_name == 'pull_request' }}
+    runs-on: ${{ inputs.runs-on || vars.CI_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 5
+    permissions:
+      # The sticky comment. The caller's grant is the ceiling.
+      pull-requests: write
+    steps:
+      - name: Download the report
+        continue-on-error: true
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: runtime-gate
+          path: ${{ runner.temp }}/rg-report
+
+      - name: Comment on PR
+        # Fork and Dependabot PRs get a read-only token; losing the comment
+        # must not change the verdict.
+        continue-on-error: true
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          REPORT: ${{ runner.temp }}/rg-report
+          EXPLORE_REASON: ${{ needs.runtime.outputs.explore-reason || 'the runtime job did not get that far' }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        with:
+          script: |
+            const fs = require('fs');
+            const read = (f) => (fs.existsSync(`${process.env.REPORT}/${f}`) ? fs.readFileSync(`${process.env.REPORT}/${f}`, 'utf8') : '');
+            const crawl = read('crawl.md') || `### ❌ Runtime crawl did not produce a report\n\nThe app may not have started. See the [run log](${process.env.RUN_URL}).`;
+            const explore = read('explore.md') || `_AI explorer not run: ${process.env.EXPLORE_REASON}. Add the \`ai-explore\` label to request one._`;
+            const marker = '<!-- runtime-gate-report -->';
+            let body = [marker, '## 🧪 Runtime gate', '', crawl, '', explore, '', `Screenshots, diffs and the app log: [runtime-gate artifact](${process.env.RUN_URL}).`].join('\n');
+            if (body.length > 60000) body = `${body.slice(0, 60000)}\n\n… truncated, full report in the artifact.`;
+            const { data: comments } = await github.rest.issues.listComments({ owner: context.repo.owner, repo: context.repo.repo, issue_number: context.issue.number, per_page: 100 });
+            const existing = comments.find((c) => c.body && c.body.includes(marker));
+            if (existing) await github.rest.issues.updateComment({ owner: context.repo.owner, repo: context.repo.repo, comment_id: existing.id, body });
+            else await github.rest.issues.createComment({ owner: context.repo.owner, repo: context.repo.repo, issue_number: context.issue.number, body });
