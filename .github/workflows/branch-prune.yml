@@ -1,0 +1,126 @@
+# Sweeps branches whose pull request was merged, across every repository this
+# account owns.
+#
+# `delete_branch_on_merge` only works going forward, so every branch from a PR
+# merged before it was switched on stays forever. This clears that backlog,
+# and anything the setting misses later, under narrow rules: merged at the
+# branch's current tip, not the default branch, not protected, no deletion
+# ruleset, no open PR on it, not a long-lived name. Everything else is
+# reported, never deleted. The rules are in scripts/prune-merged-branches.sh,
+# the same file TanksterAI/.github runs for the organisation.
+#
+# DRY RUN BY DEFAULT. The nightly run only reports, unless the repository
+# variable PRUNE_APPLY is exactly `true`. A hand-run follows its `mode` input,
+# which defaults to dry-run.
+#
+# TOKEN. GITHUB_TOKEN only reaches this repository, so this needs a
+# fine-grained PAT in the repository secret PRUNE_TOKEN. Without it the job
+# explains how to create one and exits green, doing nothing.
+name: branch-prune
+
+on:
+  schedule:
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: dry-run reports what would be deleted; apply deletes it.
+        type: choice
+        options:
+          - dry-run
+          - apply
+        default: dry-run
+
+permissions: {}
+
+# Two sweeps at once would race each other's re-reads. Queue, never cancel: a
+# cancelled apply stops between a check and a delete.
+concurrency:
+  group: branch-prune-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  prune:
+    name: Prune merged branches
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Checkout only. Every API call uses PRUNE_TOKEN, never GITHUB_TOKEN.
+    permissions:
+      contents: read
+    steps:
+      - name: Check for PRUNE_TOKEN
+        id: token
+        env:
+          PRUNE_TOKEN: ${{ secrets.PRUNE_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -n "${PRUNE_TOKEN}" ]; then
+            echo "present=true" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          echo "present=false" >> "${GITHUB_OUTPUT}"
+          echo "::notice title=branch-prune skipped::PRUNE_TOKEN is not set, so nothing was checked or deleted. See the job summary for how to create it."
+          {
+            echo "### Merged-branch prune: not configured"
+            echo
+            echo "The repository secret \`PRUNE_TOKEN\` is not set, so this run did nothing."
+            echo
+            echo "1. GitHub -> Settings -> Developer settings -> Personal access tokens -> **Fine-grained tokens** -> Generate new token."
+            echo "2. Resource owner: **rishitank**. Repository access: **All repositories**."
+            echo "3. Repository permissions:"
+            echo "   - **Contents: Read and write** (read branches; delete refs in apply mode)"
+            echo "   - **Pull requests: Read-only** (which branches were merged)"
+            echo "   - **Administration: Read-only** (branch rules)"
+            echo "   - **Metadata: Read-only** (added automatically)"
+            echo "4. Copy the token into this repository: Settings -> Secrets and variables -> Actions -> New repository secret, name \`PRUNE_TOKEN\`."
+            echo "5. Run this workflow by hand with \`mode: dry-run\` and read the report."
+            echo "6. To let the nightly run delete, add the repository variable \`PRUNE_APPLY\` = \`true\`."
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: steps.token.outputs.present == 'true'
+        with:
+          persist-credentials: false
+
+      - name: Decide mode
+        id: mode
+        if: steps.token.outputs.present == 'true'
+        env:
+          EVENT: ${{ github.event_name }}
+          REQUESTED: ${{ inputs.mode }}
+          PRUNE_APPLY: ${{ vars.PRUNE_APPLY }}
+        run: |
+          set -euo pipefail
+          if [ "${EVENT}" = "workflow_dispatch" ]; then
+            case "${REQUESTED}" in
+              apply) mode=apply ;;
+              dry-run|"") mode=dry-run ;;
+              *) echo "::error::mode must be dry-run or apply, not '${REQUESTED}'"; exit 1 ;;
+            esac
+          elif [ "${PRUNE_APPLY}" = "true" ]; then
+            mode=apply
+          else
+            mode=dry-run
+          fi
+          echo "mode: ${mode}"
+          echo "mode=${mode}" >> "${GITHUB_OUTPUT}"
+
+      - name: Prune
+        if: steps.token.outputs.present == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.PRUNE_TOKEN }}
+          OWNER: ${{ github.repository_owner }}
+          MODE: ${{ steps.mode.outputs.mode }}
+        run: |
+          set -euo pipefail
+          bash scripts/prune-merged-branches.sh --user "${OWNER}" --mode "${MODE}" \
+            --report "${RUNNER_TEMP}/branch-prune-report.json"
+
+      - name: Upload report
+        if: always() && steps.token.outputs.present == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: branch-prune-report
+          path: ${{ runner.temp }}/branch-prune-report.json
+          if-no-files-found: warn
+          retention-days: 30
