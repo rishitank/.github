@@ -1,0 +1,749 @@
+# Reusable runtime gate: build the app, boot it, and use it in a real browser.
+#
+# Build and unit-test checks prove the code compiles. They do not prove the
+# app still works when a dependency update changes what happens at runtime:
+# a hydration mismatch, a chunk that 404s, a component that throws on click,
+# a page that renders blank. This workflow boots the same app people get and
+# goes looking for exactly that, with no test cases to maintain:
+#
+#   1. crawl (blocking)    every discoverable page, desktop and phone, safe
+#                          controls clicked, links followed client-side, a
+#                          missing-route probe. Fails on uncaught exceptions,
+#                          console errors, failed same-origin requests, 4xx/5xx,
+#                          blank pages, framework crash screens.
+#                          With a test login it signs in and crawls again
+#                          behind the login. Replays the flows the explorer
+#                          recorded (blocking on dependency PRs). Errors that
+#                          do not recur on a clean retry are flaky, not
+#                          blocking; known ones can be quarantined. Reports
+#                          route/control/form/JS coverage vs the base branch.
+#   2. visual (advisory)   screenshots compared with the last default-branch run.
+#   3. explore (advisory)  Gemini uses the app like a person, by look and feel,
+#                          for major or framework updates, labelled PRs,
+#                          schedules and manual runs. Free tier; needs the
+#                          GEMINI_API_KEY secret, skips itself without it.
+#                          Every page is screened for prompt injection first,
+#                          and every action it asks for is validated. What it
+#                          does successfully is recorded as replayable flows;
+#                          runtime-gate-flows.yml saves them to the repo.
+#
+# Three ways to run the app (`mode`):
+#   command  install + build + start on the runner (optionally building inside
+#            an old toolchain image via `build-image`, for legacy apps)
+#   docker   build the repo's production Dockerfile and run it, i.e. the same
+#            artefact Coolify deploys
+#   static   install + build, then serve a directory of files
+#
+# The toolkit (crawler, explorer, static server) is the composite action at
+# .github/actions/runtime-gate in this repository. It is pinned by commit
+# below; move the pin and this file together.
+name: runtime-gate
+
+on:
+  workflow_call:
+    inputs:
+      mode:
+        description: command, docker or static.
+        type: string
+        default: command
+      working-directory:
+        description: Directory of the app inside the repository.
+        type: string
+        default: .
+      setup:
+        description: 'Runtime to install for command/static modes: node, python, bun or none.'
+        type: string
+        default: node
+      node-version-file:
+        description: Preferred over node-version. Relative to the working directory.
+        type: string
+        default: .nvmrc
+      node-version:
+        description: Used when node-version-file does not exist. Defaults to the latest Current release.
+        type: string
+        default: current
+      package-manager:
+        description: npm, pnpm, yarn or bun.
+        type: string
+        default: npm
+      pnpm-version:
+        description: Empty reads packageManager from package.json.
+        type: string
+        default: ""
+      python-version:
+        type: string
+        default: "3.12"
+      install:
+        description: Install command. Empty derives it from package-manager and the lockfile.
+        type: string
+        default: ""
+      build:
+        description: Build command. Empty skips.
+        type: string
+        default: npm run build
+      build-image:
+        description: >-
+          Run install and build inside this container image instead of on the
+          runner, e.g. node:14-bullseye for an app whose toolchain no longer
+          builds on current Node. The app is still served and tested on the runner.
+        type: string
+        default: ""
+      start:
+        description: Start command for mode=command. Must listen on `port`.
+        type: string
+        default: ""
+      static-dir:
+        description: Directory to serve for mode=static, relative to the working directory.
+        type: string
+        default: build
+      spa:
+        description: mode=static serves index.html for unknown paths (client-side routing).
+        type: boolean
+        default: true
+      dockerfile:
+        description: mode=docker. Relative to the repository root.
+        type: string
+        default: Dockerfile
+      docker-context:
+        description: mode=docker. Relative to the repository root.
+        type: string
+        default: .
+      docker-build-args:
+        description: mode=docker. Newline-separated KEY=VALUE build arguments.
+        type: string
+        default: ""
+      port:
+        description: Port the app listens on.
+        type: number
+        default: 3000
+      ready-path:
+        description: Path polled until the app answers.
+        type: string
+        default: /
+      ready-timeout:
+        description: Seconds to wait for the app to answer.
+        type: number
+        default: 180
+      env:
+        description: >-
+          Newline-separated KEY=VALUE environment for build and runtime. CI-only
+          dummy values; never real secrets. DATABASE_URL is added
+          automatically when `postgres` is set. In docker mode these reach the
+          running container only; values the image needs at build time (for
+          example NEXT_PUBLIC_*) go in docker-build-args.
+        type: string
+        default: ""
+      postgres:
+        description: Postgres major version to run alongside the app (e.g. "17"). Empty for none.
+        type: string
+        default: ""
+      migrate:
+        description: Command run after install/build and before start, e.g. migrations and seed data.
+        type: string
+        default: ""
+      routes:
+        description: Extra paths to visit, newline-separated.
+        type: string
+        default: ""
+      exclude:
+        description: Path regexes never to visit, newline-separated.
+        type: string
+        default: ""
+      ignore:
+        description: Regexes for console messages or URLs to tolerate, newline-separated. Keep short.
+        type: string
+        default: ""
+      fail-text:
+        description: Extra on-page text that means the app crashed, newline-separated.
+        type: string
+        default: ""
+      max-pages:
+        type: number
+        default: 40
+      mobile:
+        type: boolean
+        default: true
+      interact:
+        description: Operate safe controls on each page (never submit or destructive ones).
+        type: boolean
+        default: true
+      interact-max:
+        description: Most controls to operate per page.
+        type: number
+        default: 12
+      forms:
+        description: Fill forms with dummy data and submit them (never send/pay/delete ones).
+        type: boolean
+        default: true
+      login-path:
+        description: Sign-in page, e.g. /login. Turns on the signed-in crawl and a signed-in explorer.
+        type: string
+        default: ""
+      login-username:
+        description: Test account (CI-only dummy, created by `migrate` seed data or by signup-path).
+        type: string
+        default: ci@example.com
+      login-password:
+        description: Test account password. A CI-only dummy, never a real credential.
+        type: string
+        default: ""
+      signup-path:
+        description: Register the test account here first, for apps without seed data.
+        type: string
+        default: ""
+      login-check:
+        description: A path only signed-in users can open; proves the sign-in worked.
+        type: string
+        default: ""
+      login-script:
+        description: 'Repo module that signs in when a form will not do. Default export async ({ page, context, base, username, password }).'
+        type: string
+        default: ""
+      flows-strict:
+        description: auto (a recorded flow that can no longer be done blocks dependency-update PRs, warns on others), true or false.
+        type: string
+        default: auto
+      retry:
+        description: Re-open pages with blocking findings once; findings that do not recur are reported as flaky, not blocking.
+        type: boolean
+        default: true
+      quarantine:
+        description: 'Regexes for known problems to show but not block on, matched against "kind: message @ /path". Newline-separated; link an issue in a comment.'
+        type: string
+        default: ""
+      http-user:
+        description: Basic-auth user for a staging gate (dummy CI value).
+        type: string
+        default: ""
+      http-password:
+        description: Basic-auth password for a staging gate (dummy CI value).
+        type: string
+        default: ""
+      browser:
+        description: chromium (full browser in new headless mode), chrome, firefox or webkit.
+        type: string
+        default: chromium
+      headed:
+        description: Run the browser with a visible window on a virtual display.
+        type: boolean
+        default: false
+      visual-diff:
+        description: Compare screenshots with the last successful run on the base branch.
+        type: boolean
+        default: true
+      explore:
+        description: >-
+          auto (major/framework updates, labelled PRs, schedules, manual runs),
+          always, or off.
+        type: string
+        default: auto
+      explore-labels:
+        description: PR labels that request an exploration, comma-separated.
+        type: string
+        default: major-upgrade,ai-explore
+      explore-match:
+        description: Regex on the PR title that requests an exploration in auto mode.
+        type: string
+        default: '\b(major|react|react-dom|next|vite|vue|svelte|astro|remix|react-router|tanstack|tailwindcss|webpack|typescript|angular|nuxt|preact|solid-js|motion|framer-motion|gsap|radix|shadcn|mui|express|fastapi|flask|django|starlette|uvicorn|jinja2|wrangler|hono)\b'
+      explore-model:
+        type: string
+        default: gemini-flash-latest
+      explore-steps:
+        type: number
+        default: 30
+      explore-guard:
+        description: Prompt-injection screening before the model sees a page - model (heuristics plus a small classifier), heuristic or off.
+        type: string
+        default: model
+      comment:
+        description: Post a sticky PR comment with the results.
+        type: boolean
+        default: true
+      runs-on:
+        description: Empty follows the CI_RUNNER variable, then ubuntu-latest.
+        type: string
+        default: ""
+      timeout-minutes:
+        type: number
+        default: 40
+    secrets:
+      gemini-api-key:
+        description: Gemini API key (AI Studio free tier) for the explorer. Optional.
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  runtime:
+    name: Runtime gate
+    runs-on: ${{ inputs.runs-on || vars.CI_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    # No write scope here: this job runs the app's install, build, migrate
+    # and start, i.e. dependency code under test. The PR comment is posted by
+    # the separate `comment` job below, which runs none of it.
+    permissions:
+      contents: read
+      # Reading the base branch's last run for the visual baseline.
+      actions: read
+    outputs:
+      explore-reason: ${{ steps.plan.outputs.explore-reason }}
+    env:
+      RG_PORT: ${{ inputs.port }}
+      RG_BASE: http://127.0.0.1:${{ inputs.port }}
+      RG_REPORT: ${{ github.workspace }}/runtime-gate-report
+      RG_WD: ${{ inputs.working-directory }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Plan
+        id: plan
+        run: |
+          set -euo pipefail
+          cd "${RG_WD}"
+          # Node version: the repo's own file wins, so CI and local dev agree.
+          if [ -n "${NODE_VERSION_FILE}" ] && [ -f "${NODE_VERSION_FILE}" ]; then
+            echo "node-file=${RG_WD%/}/${NODE_VERSION_FILE}" >> "$GITHUB_OUTPUT"
+          else
+            echo "node-file=" >> "$GITHUB_OUTPUT"
+          fi
+          # Install command from the package manager and whether a lockfile exists.
+          install="${INSTALL_INPUT}"
+          if [ -z "${install}" ]; then
+            case "${PM}" in
+              pnpm) if [ -f pnpm-lock.yaml ]; then install="pnpm install --frozen-lockfile"; else install="pnpm install"; fi ;;
+              yarn) if [ -f yarn.lock ]; then install="yarn install --frozen-lockfile"; else install="yarn install"; fi ;;
+              bun) if [ -f bun.lock ] || [ -f bun.lockb ]; then install="bun install --frozen-lockfile"; else install="bun install"; fi ;;
+              *) if [ -f package-lock.json ] || [ -f npm-shrinkwrap.json ]; then install="npm ci"; elif [ -f package.json ]; then install="npm install"; else install="true"; fi ;;
+            esac
+          fi
+          {
+            echo "install<<__RG__"
+            echo "${install}"
+            echo "__RG__"
+          } >> "$GITHUB_OUTPUT"
+          # Exploration: decided here so the reason is visible in the log.
+          explore=false
+          reason="off"
+          case "${EXPLORE_MODE}" in
+            always) explore=true; reason="explore: always" ;;
+            off) reason="explore: off" ;;
+            auto)
+              if [ "${EVENT}" = "schedule" ] || [ "${EVENT}" = "workflow_dispatch" ]; then
+                explore=true; reason="${EVENT} run"
+              elif [ "${EVENT}" = "pull_request" ] || [ "${EVENT}" = "pull_request_target" ]; then
+                IFS=',' read -r -a wanted <<< "${EXPLORE_LABELS}"
+                for l in "${wanted[@]}"; do
+                  l="$(echo "${l}" | xargs)"
+                  if [ -n "${l}" ] && printf '%s' "${PR_LABELS}" | grep -qF "\"${l}\""; then explore=true; reason="label ${l}"; fi
+                done
+                if [ "${explore}" = "false" ] && printf '%s' "${PR_TITLE}" | grep -qiP -- "${EXPLORE_MATCH}"; then
+                  explore=true; reason="PR title matches a framework or major update"
+                fi
+                [ "${explore}" = "true" ] || reason="no major/framework signal in this PR"
+              else
+                reason="${EVENT} event"
+              fi
+              ;;
+            *) echo "::error title=explore::must be auto, always or off, not '${EXPLORE_MODE}'"; exit 1 ;;
+          esac
+          echo "explore=${explore}" >> "$GITHUB_OUTPUT"
+          echo "Exploration: ${explore} (${reason})"
+          echo "explore-reason=${reason}" >> "$GITHUB_OUTPUT"
+          # Dependency-update PRs: the UI should not change, so a recorded
+          # flow that stops working is a regression (flows-strict: auto).
+          deps=false
+          case "${PR_AUTHOR}" in renovate\[bot\]|dependabot\[bot\]|renovate-bot) deps=true ;; esac
+          case "${HEAD_REF}" in renovate/*|dependabot/*) deps=true ;; esac
+          echo "deps-pr=${deps}" >> "$GITHUB_OUTPUT"
+          echo "Dependency-update PR: ${deps}"
+        env:
+          NODE_VERSION_FILE: ${{ inputs.node-version-file }}
+          INSTALL_INPUT: ${{ inputs.install }}
+          PM: ${{ inputs.package-manager }}
+          EXPLORE_MODE: ${{ inputs.explore }}
+          EXPLORE_LABELS: ${{ inputs.explore-labels }}
+          EXPLORE_MATCH: ${{ inputs.explore-match }}
+          EVENT: ${{ github.event_name }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          HEAD_REF: ${{ github.head_ref }}
+
+      - name: Install pnpm
+        if: inputs.mode != 'docker' && inputs.build-image == '' && inputs.package-manager == 'pnpm'
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+        with:
+          version: ${{ inputs.pnpm-version }}
+          package_json_file: ${{ inputs.working-directory }}/package.json
+
+      - name: Install Bun
+        if: inputs.mode != 'docker' && inputs.build-image == '' && (inputs.setup == 'bun' || inputs.package-manager == 'bun')
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+
+      - name: Set up Node
+        if: inputs.mode != 'docker' && inputs.build-image == '' && (inputs.setup == 'node' || inputs.setup == 'bun')
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: ${{ steps.plan.outputs.node-file }}
+          node-version: ${{ steps.plan.outputs.node-file == '' && inputs.node-version || '' }}
+
+      - name: Set up Python
+        if: inputs.mode != 'docker' && inputs.build-image == '' && inputs.setup == 'python'
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ inputs.python-version }}
+
+      - name: Environment
+        run: |
+          set -euo pipefail
+          : > "${RUNNER_TEMP}/rg.env"
+          while IFS= read -r line; do
+            line="${line%$'\r'}"
+            [ -z "${line// }" ] && continue
+            case "${line}" in \#*) continue ;; esac
+            name="${line%%=*}"
+            if ! [[ "${name}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+              echo "::error title=env::'${name}' is not a valid variable name"; exit 1
+            fi
+            printf '%s\n' "${line}" >> "${RUNNER_TEMP}/rg.env"
+            printf '%s\n' "${line}" >> "$GITHUB_ENV"
+          done <<< "${RG_ENV_LINES}"
+          {
+            echo "PORT=${RG_PORT}"
+            echo "CI=true"
+          } >> "${RUNNER_TEMP}/rg.env"
+        env:
+          RG_ENV_LINES: ${{ inputs.env }}
+
+      - name: Start Postgres
+        if: inputs.postgres != ''
+        run: |
+          set -euo pipefail
+          docker run -d --name rg-postgres -p 5432:5432 \
+            -e POSTGRES_PASSWORD=postgres -e POSTGRES_USER=postgres -e POSTGRES_DB=app \
+            "postgres:${PG_VERSION}"
+          for _ in $(seq 1 60); do
+            if docker exec rg-postgres pg_isready -U postgres -d app >/dev/null 2>&1; then break; fi
+            sleep 1
+          done
+          docker exec rg-postgres pg_isready -U postgres -d app
+          url="postgres://postgres:postgres@127.0.0.1:5432/app"
+          grep -q '^DATABASE_URL=' "${RUNNER_TEMP}/rg.env" || {
+            echo "DATABASE_URL=${url}" >> "$GITHUB_ENV"
+            echo "DATABASE_URL=${url}" >> "${RUNNER_TEMP}/rg.env"
+          }
+        env:
+          PG_VERSION: ${{ inputs.postgres }}
+
+      - name: Install and build
+        if: inputs.mode != 'docker'
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          set -euo pipefail
+          script="${INSTALL_CMD}"
+          if [ -n "${BUILD_CMD}" ]; then script="${script} && ${BUILD_CMD}"; fi
+          if [ -n "${BUILD_IMAGE}" ]; then
+            echo "Building inside ${BUILD_IMAGE}"
+            docker run --rm --network host --env-file "${RUNNER_TEMP}/rg.env" \
+              -v "${GITHUB_WORKSPACE}:/w" -w "/w/${RG_WD}" \
+              -u "$(id -u):$(id -g)" -e HOME=/tmp \
+              "${BUILD_IMAGE}" bash -c "${script}"
+          else
+            bash -c "${script}"
+          fi
+        env:
+          INSTALL_CMD: ${{ steps.plan.outputs.install }}
+          BUILD_CMD: ${{ inputs.build }}
+          BUILD_IMAGE: ${{ inputs.build-image }}
+
+      - name: Build image
+        if: inputs.mode == 'docker'
+        run: |
+          set -euo pipefail
+          args=()
+          while IFS= read -r line; do
+            line="${line%$'\r'}"
+            [ -n "${line// }" ] && args+=(--build-arg "${line}")
+          done <<< "${BUILD_ARGS}"
+          docker build -f "${DOCKERFILE}" "${args[@]}" -t rg-app "${CONTEXT}"
+        env:
+          DOCKERFILE: ${{ inputs.dockerfile }}
+          CONTEXT: ${{ inputs.docker-context }}
+          BUILD_ARGS: ${{ inputs.docker-build-args }}
+
+      - name: Migrate
+        if: inputs.migrate != ''
+        working-directory: ${{ inputs.working-directory }}
+        run: bash -c "${MIGRATE}"
+        env:
+          MIGRATE: ${{ inputs.migrate }}
+
+      - name: Start app (command)
+        if: inputs.mode == 'command'
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          set -euo pipefail
+          if [ -z "${START_CMD}" ]; then
+            echo "::error title=start::mode=command needs a start command"; exit 1
+          fi
+          PORT="${RG_PORT}" nohup bash -c "${START_CMD}" > "${RUNNER_TEMP}/rg-server.log" 2>&1 &
+          echo "Started: ${START_CMD}"
+        env:
+          START_CMD: ${{ inputs.start }}
+
+      - name: Start app (docker)
+        if: inputs.mode == 'docker'
+        run: |
+          set -euo pipefail
+          # Host networking: the app reaches Postgres on 127.0.0.1 and the
+          # browser reaches the app on the same port as in production.
+          docker run -d --name rg-app --network host --env-file "${RUNNER_TEMP}/rg.env" rg-app
+          ( docker logs -f rg-app > "${RUNNER_TEMP}/rg-server.log" 2>&1 & )
+
+      - name: Start app (static)
+        if: inputs.mode == 'static'
+        uses: rishitank/.github/.github/actions/runtime-gate@9842c78a4caec4d9a5ae2305533175a5c6cee0f9
+        with:
+          mode: serve
+          serve-dir: ${{ inputs.working-directory }}/${{ inputs.static-dir }}
+          serve-port: ${{ inputs.port }}
+          spa: ${{ inputs.spa }}
+
+      - name: Wait for the app
+        run: |
+          set -uo pipefail
+          deadline=$(( $(date +%s) + READY_TIMEOUT ))
+          code=000
+          while [ "$(date +%s)" -lt "${deadline}" ]; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "${RG_BASE}${READY_PATH}" || true)
+            # Any answer below 500 means the server is up (a staging gate's 401 included).
+            if [ "${code}" != "000" ] && [ "${code}" -lt 500 ]; then
+              echo "App answered ${code} on ${READY_PATH}"
+              exit 0
+            fi
+            if [ "${MODE}" = "docker" ] && [ "$(docker inspect -f '{{.State.Running}}' rg-app 2>/dev/null)" != "true" ]; then
+              echo "::error title=App exited::the container stopped before answering"; break
+            fi
+            sleep 2
+          done
+          echo "::error title=App did not start::no answer below 500 on ${RG_BASE}${READY_PATH} within ${READY_TIMEOUT}s (last: ${code})"
+          echo "----- app log -----"
+          tail -n 200 "${RUNNER_TEMP}/rg-server.log" 2>/dev/null || true
+          exit 1
+        env:
+          READY_PATH: ${{ inputs.ready-path }}
+          READY_TIMEOUT: ${{ inputs.ready-timeout }}
+          MODE: ${{ inputs.mode }}
+
+      - name: Find the visual baseline
+        id: baseline
+        if: inputs.visual-diff && github.event_name == 'pull_request'
+        continue-on-error: true
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            // The caller's workflow file, e.g. ".github/workflows/ci.yml".
+            const file = (process.env.WORKFLOW_REF.split('@')[0].split('/').slice(2).join('/')).replace(/^\.github\/workflows\//, '');
+            const runs = await github.rest.actions.listWorkflowRuns({
+              owner: context.repo.owner, repo: context.repo.repo, workflow_id: file,
+              branch: process.env.BASE_REF, status: 'success', per_page: 10,
+            });
+            for (const run of runs.data.workflow_runs) {
+              const arts = await github.rest.actions.listWorkflowRunArtifacts({ owner: context.repo.owner, repo: context.repo.repo, run_id: run.id });
+              if (arts.data.artifacts.some((a) => a.name === 'runtime-gate-baseline' && !a.expired)) {
+                core.setOutput('run-id', String(run.id));
+                core.info(`Baseline from run ${run.id} (${run.head_sha.slice(0, 7)})`);
+                return;
+              }
+            }
+            core.info('No baseline yet: the first run on the base branch creates it.');
+        env:
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+          BASE_REF: ${{ github.base_ref }}
+
+      - name: Download the visual baseline
+        if: steps.baseline.outputs.run-id != ''
+        continue-on-error: true
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: runtime-gate-baseline
+          run-id: ${{ steps.baseline.outputs.run-id }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/rg-baseline
+
+      - name: Crawl
+        id: crawl
+        continue-on-error: true
+        uses: rishitank/.github/.github/actions/runtime-gate@9842c78a4caec4d9a5ae2305533175a5c6cee0f9
+        with:
+          mode: crawl
+          url: ${{ env.RG_BASE }}
+          out: ${{ env.RG_REPORT }}
+          routes: ${{ inputs.routes }}
+          exclude: ${{ inputs.exclude }}
+          ignore: ${{ inputs.ignore }}
+          fail-text: ${{ inputs.fail-text }}
+          max-pages: ${{ inputs.max-pages }}
+          mobile: ${{ inputs.mobile }}
+          interact: ${{ inputs.interact }}
+          interact-max: ${{ inputs.interact-max }}
+          forms: ${{ inputs.forms }}
+          login-path: ${{ inputs.login-path }}
+          login-username: ${{ inputs.login-username }}
+          login-password: ${{ inputs.login-password }}
+          signup-path: ${{ inputs.signup-path }}
+          login-check: ${{ inputs.login-check }}
+          login-script: ${{ inputs.login-script }}
+          flows-file: ${{ inputs.working-directory }}/.github/runtime-gate-flows.json
+          flows-strict: ${{ inputs.flows-strict }}
+          deps-pr: ${{ steps.plan.outputs.deps-pr }}
+          retry: ${{ inputs.retry }}
+          quarantine: ${{ inputs.quarantine }}
+          http-user: ${{ inputs.http-user }}
+          http-password: ${{ inputs.http-password }}
+          browser: ${{ inputs.browser }}
+          headed: ${{ inputs.headed }}
+          baseline-dir: ${{ steps.baseline.outputs.run-id != '' && format('{0}/rg-baseline', runner.temp) || '' }}
+
+      - name: Pages to explore first
+        id: focus
+        if: steps.plan.outputs.explore == 'true'
+        run: |
+          set -euo pipefail
+          f="${RG_REPORT}/crawl.json"
+          if [ -f "${f}" ]; then
+            {
+              echo "pages<<__RG__"
+              node -e '
+                const r = require(process.argv[1]);
+                const out = new Set();
+                for (const v of r.visual || []) if (v.url) out.add(v.url);
+                for (const f of r.findings || []) out.add(String(f.page).replace(r.url, "") || "/");
+                console.log([...out].slice(0, 15).join("\n"));
+              ' "${f}"
+              echo "__RG__"
+            } >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Explore (AI, advisory)
+        if: steps.plan.outputs.explore == 'true'
+        continue-on-error: true
+        uses: rishitank/.github/.github/actions/runtime-gate@9842c78a4caec4d9a5ae2305533175a5c6cee0f9
+        with:
+          mode: explore
+          url: ${{ env.RG_BASE }}
+          out: ${{ env.RG_REPORT }}
+          ignore: ${{ inputs.ignore }}
+          login-path: ${{ inputs.login-path }}
+          login-username: ${{ inputs.login-username }}
+          login-password: ${{ inputs.login-password }}
+          signup-path: ${{ inputs.signup-path }}
+          login-check: ${{ inputs.login-check }}
+          login-script: ${{ inputs.login-script }}
+          http-user: ${{ inputs.http-user }}
+          http-password: ${{ inputs.http-password }}
+          browser: ${{ inputs.browser }}
+          headed: ${{ inputs.headed }}
+          explore-guard: ${{ inputs.explore-guard }}
+          gemini-api-key: ${{ secrets.gemini-api-key }}
+          explore-model: ${{ inputs.explore-model }}
+          explore-steps: ${{ inputs.explore-steps }}
+          explore-hints-file: ${{ inputs.working-directory }}/.github/runtime-gate.md
+          explore-focus: ${{ steps.focus.outputs.pages }}
+          explore-context: ${{ github.event.pull_request.title && format('Change under test - {0}', github.event.pull_request.title) || '' }}
+
+      - name: Collect logs
+        if: always()
+        run: |
+          mkdir -p "${RG_REPORT}"
+          cp "${RUNNER_TEMP}/rg-server.log" "${RG_REPORT}/server.log" 2>/dev/null || true
+          if [ -f "${RUNNER_TEMP}/rg-server.log" ] && [ "${CRAWL}" != "success" ]; then
+            echo "----- last 80 lines of the app log -----"
+            tail -n 80 "${RUNNER_TEMP}/rg-server.log"
+          fi
+        env:
+          CRAWL: ${{ steps.crawl.outcome }}
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: runtime-gate
+          path: ${{ env.RG_REPORT }}
+          retention-days: 14
+          if-no-files-found: ignore
+
+      # The base branch's screenshots and coverage become the next PR's baseline.
+      - name: Upload baseline
+        if: steps.crawl.outcome == 'success' && github.event_name != 'pull_request'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: runtime-gate-baseline
+          path: |
+            ${{ env.RG_REPORT }}/screens
+            ${{ env.RG_REPORT }}/crawl.json
+          retention-days: 30
+          if-no-files-found: ignore
+
+      - name: Stop app
+        if: always()
+        run: |
+          docker rm -f rg-app rg-postgres >/dev/null 2>&1 || true
+
+      - name: Verdict
+        if: always()
+        run: |
+          if [ "${CRAWL}" = "success" ]; then
+            echo "Runtime gate passed."
+          else
+            echo "::error title=Runtime gate failed::the app has runtime problems (or did not start); see the job summary and the runtime-gate artifact."
+            exit 1
+          fi
+        env:
+          CRAWL: ${{ steps.crawl.outcome }}
+
+  # The sticky PR comment, in its own job so the token that can write to the
+  # PR never shares a job with the app or its dependencies. It only downloads
+  # the report artifact and reads it as text.
+  comment:
+    name: Runtime gate comment
+    needs: runtime
+    if: ${{ !cancelled() && inputs.comment && github.event_name == 'pull_request' }}
+    runs-on: ${{ inputs.runs-on || vars.CI_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 5
+    permissions:
+      # The sticky comment. The caller's grant is the ceiling.
+      pull-requests: write
+    steps:
+      - name: Download the report
+        continue-on-error: true
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: runtime-gate
+          path: ${{ runner.temp }}/rg-report
+
+      - name: Comment on PR
+        # Fork and Dependabot PRs get a read-only token; losing the comment
+        # must not change the verdict.
+        continue-on-error: true
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          REPORT: ${{ runner.temp }}/rg-report
+          EXPLORE_REASON: ${{ needs.runtime.outputs.explore-reason || 'the runtime job did not get that far' }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        with:
+          script: |
+            const fs = require('fs');
+            const read = (f) => (fs.existsSync(`${process.env.REPORT}/${f}`) ? fs.readFileSync(`${process.env.REPORT}/${f}`, 'utf8') : '');
+            const crawl = read('crawl.md') || `### ❌ Runtime crawl did not produce a report\n\nThe app may not have started. See the [run log](${process.env.RUN_URL}).`;
+            const explore = read('explore.md') || `_AI explorer not run: ${process.env.EXPLORE_REASON}. Add the \`ai-explore\` label to request one._`;
+            const marker = '<!-- runtime-gate-report -->';
+            let body = [marker, '## 🧪 Runtime gate', '', crawl, '', explore, '', `Screenshots, diffs and the app log: [runtime-gate artifact](${process.env.RUN_URL}).`].join('\n');
+            if (body.length > 60000) body = `${body.slice(0, 60000)}\n\n… truncated, full report in the artifact.`;
+            const { data: comments } = await github.rest.issues.listComments({ owner: context.repo.owner, repo: context.repo.repo, issue_number: context.issue.number, per_page: 100 });
+            const existing = comments.find((c) => c.body && c.body.includes(marker));
+            if (existing) await github.rest.issues.updateComment({ owner: context.repo.owner, repo: context.repo.repo, comment_id: existing.id, body });
+            else await github.rest.issues.createComment({ owner: context.repo.owner, repo: context.repo.repo, issue_number: context.issue.number, body });

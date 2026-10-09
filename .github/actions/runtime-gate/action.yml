@@ -1,0 +1,336 @@
+name: runtime-gate
+description: >-
+  Use a running web app in a real browser and report runtime breakage.
+  mode=crawl is deterministic and fails on errors (signed out and signed in,
+  plus replay of recorded flows); mode=explore lets Gemini use the app like a
+  person, screened against prompt injection, and is advisory.
+
+inputs:
+  mode:
+    description: >-
+      crawl, explore, serve (start the bundled static file server in the
+      background for build output that is plain files), or merge-flows (fold
+      newly recorded flows into the repo's flows file; installs nothing).
+    default: crawl
+  serve-dir:
+    description: mode=serve. Directory to serve.
+    default: build
+  serve-port:
+    description: mode=serve.
+    default: "3000"
+  spa:
+    description: mode=serve. Serve index.html for unknown paths (client-side routing).
+    default: "true"
+  url:
+    description: Base URL of the running app.
+    default: http://127.0.0.1:3000
+  out:
+    description: Directory for the report, screenshots and diffs.
+    default: runtime-gate-report
+  routes:
+    description: Extra paths to visit (newline-separated), on top of / , sitemap.xml and discovered links.
+    default: ""
+  exclude:
+    description: Path regexes never to visit (newline-separated).
+    default: ""
+  ignore:
+    description: >-
+      Regexes for console messages or URLs to tolerate (newline-separated).
+      Every entry hides a class of error; keep the list short and commented.
+    default: ""
+  fail-text:
+    description: Extra on-page text that means the app crashed (newline-separated).
+    default: ""
+  max-pages:
+    default: "40"
+  per-pattern:
+    description: Pages to visit per URL shape, e.g. /recipes/*.
+    default: "3"
+  mobile:
+    description: Repeat the first pages at phone size.
+    default: "true"
+  interact:
+    description: >-
+      Operate each page's safe controls: buttons, tabs, disclosures, menus,
+      switches, checkboxes, selects and search boxes. Anything that submits a
+      form or reads as destructive (delete, pay, sign out, send...) is skipped.
+    default: "true"
+  interact-max:
+    description: Most controls to operate per page.
+    default: "12"
+  forms:
+    description: >-
+      Fill each page's forms with dummy data and submit them (never ones whose
+      button says send, pay, delete and the like). A 4xx answer to a dummy
+      submission is a warning; exceptions, console errors and 5xx still fail.
+    default: "true"
+  baseline-dir:
+    description: A previous report directory to compare screenshots against.
+    default: ""
+  diff-threshold:
+    description: Fraction of changed pixels that counts as a visual change.
+    default: "0.002"
+  http-user:
+    description: Basic-auth user for apps behind a staging gate (CI-only dummy credentials).
+    default: ""
+  http-password:
+    default: ""
+  login-path:
+    description: >-
+      Sign-in page (e.g. /login). When set, the crawler signs in with the test
+      account and crawls again behind the login; the explorer starts signed in.
+    default: ""
+  login-username:
+    description: Test account user name or email (CI-only dummy).
+    default: ci@example.com
+  login-password:
+    description: Test account password (CI-only dummy, never a real credential).
+    default: ""
+  signup-path:
+    description: Register the test account here first (apps with no seed data).
+    default: ""
+  login-check:
+    description: A path only signed-in users can open; proves the sign-in worked.
+    default: ""
+  login-script:
+    description: >-
+      Repo module that signs in when a plain form won't do. Default export:
+      async ({ page, context, base, username, password }) => void.
+    default: ""
+  auth-max-pages:
+    description: Most pages for the signed-in crawl.
+    default: "25"
+  flows-file:
+    description: Recorded flows to replay (written by the explorer on the default branch).
+    default: .github/runtime-gate-flows.json
+  flows-new:
+    description: mode=merge-flows. Newline-separated flows.json files from the explorer, newest first.
+    default: ""
+  flows-max:
+    description: mode=merge-flows. Most flows to keep.
+    default: "20"
+  flows-strict:
+    description: >-
+      auto (a flow that can no longer be done blocks dependency-update PRs and
+      warns on others), true or false.
+    default: auto
+  deps-pr:
+    description: '"true" when the change under test is a dependency update (used by flows-strict: auto).'
+    default: "false"
+  retry:
+    description: Open pages with blocking findings once more; findings that do not recur are reported as flaky.
+    default: "true"
+  quarantine:
+    description: >-
+      Regexes (newline-separated) for known problems to show but not block on,
+      matched against "kind: message @ /path". Keep short; add an issue link.
+    default: ""
+  js-coverage:
+    description: Measure how much of the app's own JavaScript ran (Chromium only).
+    default: "true"
+  browser:
+    description: >-
+      chromium (full browser, new headless; default), chrome (branded Google
+      Chrome), firefox or webkit.
+    default: chromium
+  headed:
+    description: Run with a visible window under a virtual display (xvfb).
+    default: "false"
+  gemini-api-key:
+    description: Gemini API key for mode=explore. Without one, explore reports itself skipped.
+    default: ""
+  explore-model:
+    default: gemini-flash-latest
+  explore-steps:
+    default: "30"
+  explore-minutes:
+    default: "12"
+  explore-rpm:
+    description: Requests per minute to stay under the free tier.
+    default: "8"
+  explore-hints-file:
+    description: Repo file with app-specific hints for the explorer (test login, key flows).
+    default: .github/runtime-gate.md
+  explore-focus:
+    description: Pages to look at first (newline-separated), e.g. ones that changed visually.
+    default: ""
+  explore-context:
+    description: Free text about the change under test, e.g. the PR title.
+    default: ""
+  explore-guard:
+    description: >-
+      Prompt-injection screening of every page before the model sees it:
+      model (heuristics plus a small classifier model), heuristic, or off.
+    default: model
+  explore-guard-model:
+    description: The classifier model (has its own free-tier limits).
+    default: gemini-flash-lite-latest
+
+outputs:
+  passed:
+    description: crawl mode only; "true" when no blocking problem was found.
+    value: ${{ steps.run.outputs.passed }}
+  flows-changed:
+    description: merge-flows mode only; "true" when the flows file changed.
+    value: ${{ steps.merge.outputs.changed }}
+
+runs:
+  using: composite
+  steps:
+    - name: Check Node for the toolkit
+      id: node
+      shell: bash
+      run: |
+        case "${MODE}" in
+          crawl|explore|serve|merge-flows) ;;
+          *) echo "::error title=runtime-gate::mode must be crawl, explore, serve or merge-flows, not '${MODE}'"; exit 1 ;;
+        esac
+        major=$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)
+        if [ "${major}" -ge 22 ]; then echo "ok=true" >> "$GITHUB_OUTPUT"; else echo "ok=false" >> "$GITHUB_OUTPUT"; fi
+      env:
+        MODE: ${{ inputs.mode }}
+
+    # Only when the job has no recent Node. Runs after the app has started,
+    # so it cannot change the runtime the app was built with.
+    - name: Set up Node for the toolkit
+      if: steps.node.outputs.ok != 'true'
+      uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      with:
+        node-version: current
+
+    - name: Serve static files
+      if: inputs.mode == 'serve'
+      shell: bash
+      run: |
+        set -euo pipefail
+        if [ ! -d "${SERVE_DIR}" ]; then
+          echo "::error title=runtime-gate::nothing to serve: '${SERVE_DIR}' does not exist (did the build write somewhere else?)"
+          exit 1
+        fi
+        flag=""
+        if [ "${SPA}" = "true" ]; then flag="--spa"; fi
+        nohup node "${GITHUB_ACTION_PATH}/src/static-server.mjs" "${SERVE_DIR}" "${SERVE_PORT}" ${flag} > "${RUNNER_TEMP}/rg-server.log" 2>&1 &
+        echo "Serving ${SERVE_DIR} on :${SERVE_PORT}"
+      env:
+        SERVE_DIR: ${{ inputs.serve-dir }}
+        SERVE_PORT: ${{ inputs.serve-port }}
+        SPA: ${{ inputs.spa }}
+
+    - name: Merge recorded flows
+      id: merge
+      if: inputs.mode == 'merge-flows'
+      shell: bash
+      run: |
+        set -euo pipefail
+        added=()
+        while IFS= read -r f; do
+          f="${f%$'\r'}"
+          [ -n "${f// }" ] && added+=("${f}")
+        done <<< "${FLOWS_NEW}"
+        if [ "${#added[@]}" -eq 0 ]; then
+          echo "changed=false" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+        existing="${FLOWS_FILE}"
+        [ -f "${existing}" ] || existing="-"
+        mkdir -p "$(dirname "${FLOWS_FILE}")"
+        node "${GITHUB_ACTION_PATH}/src/flows.mjs" merge "${existing}" "${RUNNER_TEMP}/rg-flows.json" "${FLOWS_MAX}" "${added[@]}"
+        cp "${RUNNER_TEMP}/rg-flows.json" "${FLOWS_FILE}"
+      env:
+        FLOWS_NEW: ${{ inputs.flows-new }}
+        FLOWS_FILE: ${{ inputs.flows-file }}
+        FLOWS_MAX: ${{ inputs.flows-max }}
+
+    - name: Install toolkit
+      if: inputs.mode == 'crawl' || inputs.mode == 'explore'
+      shell: bash
+      run: |
+        set -euo pipefail
+        cd "${GITHUB_ACTION_PATH}"
+        if [ ! -d node_modules ]; then
+          npm ci --no-audit --no-fund --loglevel=error
+        fi
+        case "${BROWSER}" in
+          chrome) target=chrome ;;
+          firefox) target=firefox ;;
+          webkit) target=webkit ;;
+          *) target="--no-shell chromium" ;;
+        esac
+        marker="${RUNNER_TEMP:-/tmp}/runtime-gate-browser-${BROWSER}"
+        if [ ! -f "${marker}" ]; then
+          # shellcheck disable=SC2086 # target is deliberately word-split
+          npx --no-install playwright install --with-deps ${target}
+          touch "${marker}"
+        fi
+        if [ "${HEADED}" = "true" ] && ! command -v xvfb-run >/dev/null; then
+          sudo apt-get update -qq && sudo apt-get install -y -qq xvfb
+        fi
+      env:
+        BROWSER: ${{ inputs.browser }}
+        HEADED: ${{ inputs.headed }}
+
+    - name: Run
+      id: run
+      if: inputs.mode == 'crawl' || inputs.mode == 'explore'
+      shell: bash
+      run: |
+        set -uo pipefail
+        script="${GITHUB_ACTION_PATH}/src/${MODE}.mjs"
+        if [ ! -f "${script}" ]; then
+          echo "::error title=runtime-gate::mode must be crawl or explore, not '${MODE}'"
+          exit 1
+        fi
+        wrap=()
+        if [ "${RG_HEADED}" = "true" ]; then wrap=(xvfb-run -a --server-args="-screen 0 1920x1080x24"); fi
+        # ${wrap[@]+...}: an empty array under set -u is "unbound" on Bash < 4.4
+        # (macOS, some self-hosted runners).
+        ${wrap[@]+"${wrap[@]}"} node "${script}"
+        status=$?
+        if [ "${MODE}" = "crawl" ]; then
+          if [ "${status}" -eq 0 ]; then echo "passed=true" >> "$GITHUB_OUTPUT"; else echo "passed=false" >> "$GITHUB_OUTPUT"; fi
+          exit "${status}"
+        fi
+        exit 0
+      env:
+        MODE: ${{ inputs.mode }}
+        RG_URL: ${{ inputs.url }}
+        RG_OUT: ${{ inputs.out }}
+        RG_ROUTES: ${{ inputs.routes }}
+        RG_EXCLUDE: ${{ inputs.exclude }}
+        RG_IGNORE: ${{ inputs.ignore }}
+        RG_FAIL_TEXT: ${{ inputs.fail-text }}
+        RG_MAX_PAGES: ${{ inputs.max-pages }}
+        RG_PER_PATTERN: ${{ inputs.per-pattern }}
+        RG_MOBILE: ${{ inputs.mobile }}
+        RG_INTERACT: ${{ inputs.interact }}
+        RG_INTERACT_MAX: ${{ inputs.interact-max }}
+        RG_FORMS: ${{ inputs.forms }}
+        RG_BASELINE_DIR: ${{ inputs.baseline-dir }}
+        RG_DIFF_THRESHOLD: ${{ inputs.diff-threshold }}
+        RG_LOGIN_PATH: ${{ inputs.login-path }}
+        RG_LOGIN_USERNAME: ${{ inputs.login-username }}
+        RG_LOGIN_PASSWORD: ${{ inputs.login-password }}
+        RG_SIGNUP_PATH: ${{ inputs.signup-path }}
+        RG_LOGIN_CHECK: ${{ inputs.login-check }}
+        RG_LOGIN_SCRIPT: ${{ inputs.login-script }}
+        RG_AUTH_MAX_PAGES: ${{ inputs.auth-max-pages }}
+        RG_FLOWS_FILE: ${{ inputs.flows-file }}
+        RG_FLOWS_STRICT: ${{ inputs.flows-strict }}
+        RG_DEPS_PR: ${{ inputs.deps-pr }}
+        RG_RETRY: ${{ inputs.retry }}
+        RG_QUARANTINE: ${{ inputs.quarantine }}
+        RG_JS_COVERAGE: ${{ inputs.js-coverage }}
+        RG_HTTP_USER: ${{ inputs.http-user }}
+        RG_HTTP_PASSWORD: ${{ inputs.http-password }}
+        RG_BROWSER: ${{ inputs.browser }}
+        RG_HEADED: ${{ inputs.headed }}
+        GEMINI_API_KEY: ${{ inputs.gemini-api-key }}
+        RG_EXPLORE_MODEL: ${{ inputs.explore-model }}
+        RG_EXPLORE_STEPS: ${{ inputs.explore-steps }}
+        RG_EXPLORE_MINUTES: ${{ inputs.explore-minutes }}
+        RG_EXPLORE_RPM: ${{ inputs.explore-rpm }}
+        RG_EXPLORE_HINTS: ${{ inputs.explore-hints-file }}
+        RG_EXPLORE_FOCUS: ${{ inputs.explore-focus }}
+        RG_EXPLORE_CONTEXT: ${{ inputs.explore-context }}
+        RG_EXPLORE_GUARD: ${{ inputs.explore-guard }}
+        RG_EXPLORE_GUARD_MODEL: ${{ inputs.explore-guard-model }}
