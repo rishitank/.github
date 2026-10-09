@@ -92,8 +92,12 @@ guide, inputs and examples: [`docs/runtime-gate.md`](docs/runtime-gate.md).
 The Renovate presets set `platformAutomerge: false`, so Renovate itself checks
 that every status (this gate included) is green before it merges. GitHub's
 native auto-merge only waits for checks that branch protection or a ruleset
-makes required, and private repos on a free plan cannot require any, so there
-it would merge the moment the PR opened.
+makes required. A repository that has neither, for example a private
+repository on a plan that does not offer them (see GitHub's
+[protected branches](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/about-protected-branches)
+and [rulesets](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/about-rulesets)
+pages for which plans do), has no required checks, so native auto-merge would
+merge the moment the PR opened.
 
 ```yaml
 jobs:

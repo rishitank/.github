@@ -35,10 +35,13 @@ jobs:
       run:
         working-directory: .github/actions/runtime-gate
     steps:
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-node@v7.0.0
+      # `current` on purpose: the account's policy is the latest Current
+      # Node, and action.yml installs `current` when a job has no Node >= 22,
+      # so this is the runtime consumers get.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: current
       - run: npm ci --no-audit --no-fund
@@ -48,6 +51,10 @@ jobs:
   workflow:
     name: Reusable workflow end to end
     uses: ./.github/workflows/runtime-gate.yml
+    # The called workflow's jobs declare these scopes, and a caller must grant
+    # at least what a called job declares or the run is rejected at startup,
+    # even for a job that is then skipped. pull-requests: write is for its
+    # `comment` job, which `comment: false` skips here.
     permissions:
       contents: read
       actions: read
@@ -69,6 +76,7 @@ jobs:
   workflow-signed-in:
     name: Reusable workflow end to end (signed in)
     uses: ./.github/workflows/runtime-gate.yml
+    # Same grant as above, for the same reason.
     permissions:
       contents: read
       actions: read
