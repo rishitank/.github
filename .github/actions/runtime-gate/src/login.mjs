@@ -41,20 +41,24 @@ async function settle(page) {
   await page.waitForTimeout(500);
 }
 
-// A sign-in form has exactly one visible password field. Change-password and
-// sign-up forms have two or more, or mark theirs as a new password, so a
-// signed-in settings page is not mistaken for "still on the sign-in page".
-async function showsSignInForm(page) {
-  return page.evaluate(() => {
+// Away from the sign-in page, a sign-in form has exactly one visible password
+// field. Change-password and sign-up forms have two or more, or mark theirs as
+// a new password, so a signed-in settings page is not mistaken for "still on
+// the sign-in page". On the sign-in page itself (anyPassword), any visible
+// password field means the credential form is still there: some sign-in forms
+// have a second masked field, such as a security code.
+async function showsSignInForm(page, { anyPassword = false } = {}) {
+  return page.evaluate((any) => {
     const visible = (el) => !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
     const scopes = [...document.querySelectorAll('form')];
     const loose = [...document.querySelectorAll('input[type="password"]')].filter((i) => !i.closest('form'));
     if (loose.length) scopes.push({ querySelectorAll: () => loose });
     return scopes.some((f) => {
       const pw = [...f.querySelectorAll('input[type="password"]')].filter(visible);
+      if (any) return pw.length > 0;
       return pw.length === 1 && pw[0].getAttribute('autocomplete') !== 'new-password';
     });
-  }).catch(() => false);
+  }, anyPassword).catch(() => false);
 }
 
 function pathOf(url) {
@@ -67,8 +71,9 @@ async function credentialForm(page) {
   return (await form.count()) ? form : page.locator('body');
 }
 
-async function fillAndSubmit(page, scope, { username, password, everything }) {
+async function fillAndSubmit(page, scope, collector, { username, password, everything }) {
   const fields = await scope.locator('input, textarea, select').all();
+  const typed = [username];
   let userFilled = false;
   for (const el of fields) {
     const f = await el.evaluate((n) => ({
@@ -91,7 +96,9 @@ async function fillAndSubmit(page, scope, { username, password, everything }) {
       if (f.tag === 'SELECT') {
         if ((await el.locator('option').count()) > 1) await el.selectOption({ index: 1 }, { timeout: 2000 });
       } else if (f.type !== 'radio') {
-        await el.fill(dummyFor(f), { timeout: 2000 });
+        const value = dummyFor(f);
+        await el.fill(value, { timeout: 2000 });
+        typed.push(value);
       }
     }
   }
@@ -101,9 +108,17 @@ async function fillAndSubmit(page, scope, { username, password, everything }) {
     if (await first.count()) await first.fill(username, { timeout: 3000 });
   }
   const submit = scope.locator('button[type="submit"], button:not([type]), input[type="submit"]').first();
-  if ((await submit.count()) && (await submit.isVisible())) await submit.click({ timeout: 5000 });
-  else await scope.locator(PASSWORD).last().press('Enter');
-  await settle(page);
+  // A 4xx answering this form (an existing account, a wrong password) is
+  // expected and only a warning; other requests are judged as usual.
+  const action = await scope.evaluate((n) => (n.tagName === 'FORM' ? n.action : '')).catch(() => '');
+  collector.beginSubmission(page, { action, values: typed });
+  try {
+    if ((await submit.count()) && (await submit.isVisible())) await submit.click({ timeout: 5000 });
+    else await scope.locator(PASSWORD).last().press('Enter');
+    await settle(page);
+  } finally {
+    collector.endSubmission();
+  }
 }
 
 async function alertText(page) {
@@ -128,28 +143,18 @@ export async function signIn(context, base, cfg, collector) {
     } else {
       if (cfg.signupPath) {
         collector.currentPage = `${base}${cfg.signupPath} (sign-up)`;
-        collector.expectClientErrors = true;
-        try {
-          await page.goto(`${base}${cfg.signupPath}`, { waitUntil: 'load', timeout: 30000 });
-          await settle(page);
-          if (await page.locator(PASSWORD).count()) {
-            await fillAndSubmit(page, await credentialForm(page), { ...cfg, everything: true });
-          }
-        } finally {
-          collector.expectClientErrors = false;
+        await page.goto(`${base}${cfg.signupPath}`, { waitUntil: 'load', timeout: 30000 });
+        await settle(page);
+        if (await page.locator(PASSWORD).count()) {
+          await fillAndSubmit(page, await credentialForm(page), collector, { ...cfg, everything: true });
         }
         collector.currentPage = label;
       }
-      collector.expectClientErrors = true;
-      try {
-        await page.goto(`${base}${cfg.path}`, { waitUntil: 'load', timeout: 30000 });
-        await settle(page);
-        // Some apps sign the new account straight in after sign-up.
-        if (await page.locator(PASSWORD).count()) {
-          await fillAndSubmit(page, await credentialForm(page), { ...cfg, everything: false });
-        }
-      } finally {
-        collector.expectClientErrors = false;
+      await page.goto(`${base}${cfg.path}`, { waitUntil: 'load', timeout: 30000 });
+      await settle(page);
+      // Some apps sign the new account straight in after sign-up.
+      if (await page.locator(PASSWORD).count()) {
+        await fillAndSubmit(page, await credentialForm(page), collector, { ...cfg, everything: false });
       }
     }
 
@@ -164,8 +169,10 @@ export async function signIn(context, base, cfg, collector) {
       landed = page.url();
       if (!ok) return { ok, landed, reason: `opening ${cfg.check} after signing in ended on ${pathOf(page.url())} (HTTP ${status})${await alertText(page) ? `; the page says "${await alertText(page)}"` : ''}` };
     } else {
-      const formGone = !(await showsSignInForm(page));
-      ok = formGone || (loginPath && pathOf(page.url()) !== loginPath);
+      // Still on the sign-in page: any remaining password field is a failed
+      // sign-in. Moved elsewhere: only a page that is itself a sign-in form is.
+      const onLoginPage = Boolean(loginPath) && pathOf(page.url()) === loginPath;
+      ok = !(await showsSignInForm(page, { anyPassword: onLoginPage }));
       if (!ok) return { ok, landed, reason: `still on the sign-in form after submitting${await alertText(page) ? `; the page says "${await alertText(page)}"` : ''}` };
     }
     return { ok: true, landed };

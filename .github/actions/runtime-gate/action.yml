@@ -194,7 +194,7 @@ runs:
     # so it cannot change the runtime the app was built with.
     - name: Set up Node for the toolkit
       if: steps.node.outputs.ok != 'true'
-      uses: actions/setup-node@v7.0.0
+      uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
       with:
         node-version: current
 
@@ -282,7 +282,9 @@ runs:
         fi
         wrap=()
         if [ "${RG_HEADED}" = "true" ]; then wrap=(xvfb-run -a --server-args="-screen 0 1920x1080x24"); fi
-        "${wrap[@]}" node "${script}"
+        # ${wrap[@]+...}: an empty array under set -u is "unbound" on Bash < 4.4
+        # (macOS, some self-hosted runners).
+        ${wrap[@]+"${wrap[@]}"} node "${script}"
         status=$?
         if [ "${MODE}" = "crawl" ]; then
           if [ "${status}" -eq 0 ]; then echo "passed=true" >> "$GITHUB_OUTPUT"; else echo "passed=false" >> "$GITHUB_OUTPUT"; fi

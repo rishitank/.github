@@ -10,6 +10,7 @@
 // Usage as a script (the workflow uses this to update the repo file): see the
 // bottom of this file. Imports nothing that needs installing.
 import fs from 'node:fs';
+import { pathToFileURL } from 'node:url';
 import { toStep } from './actions.mjs';
 
 const MAX_STEPS = 10;
@@ -104,7 +105,9 @@ export function mergeFlows(existing, added, max = 20) {
 
 // Usage: node flows.mjs merge <existing.json|-> <out.json> <max> <added.json>...
 // Earlier files among <added> win over later ones; all win over <existing>.
-if (import.meta.url === `file://${process.argv[1]}`) {
+// Compare file URLs, not strings: import.meta.url is percent-encoded and has
+// symlinks resolved, process.argv[1] is neither.
+if (process.argv[1] && import.meta.url === pathToFileURL(fs.realpathSync(process.argv[1])).href) {
   const [cmd, existingFile, outFile, max, ...addedFiles] = process.argv.slice(2);
   if (cmd !== 'merge' || !outFile || !addedFiles.length) {
     console.error('usage: node flows.mjs merge <existing.json|-> <out.json> <max> <added.json>...');

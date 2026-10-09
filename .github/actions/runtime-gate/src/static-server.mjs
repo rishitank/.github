@@ -6,6 +6,7 @@
 //
 // --spa serves index.html for unknown extensionless paths (client-side
 // routing); without it they get 404.html if present, else a plain 404.
+// Port 0 picks a free port; the one in use is printed as "static: <dir> on :<port>".
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -29,11 +30,21 @@ function send(res, status, file) {
   fs.createReadStream(file).pipe(res);
 }
 
+// path.relative, not a string prefix: /w/dist must not admit /w/dist-secret
+// (or /w/dist.html, which "/" + ".html" would otherwise reach).
+function inside(file) {
+  const rel = path.relative(root, file);
+  return rel !== '' && rel !== '..' && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel);
+}
+
 function resolveFile(urlPath) {
-  const clean = decodeURIComponent(urlPath.split('?')[0]);
-  const target = path.normalize(path.join(root, clean));
-  if (!target.startsWith(root)) return null;
+  let clean;
+  // A malformed escape (e.g. %E0%A4%A) is a bad request, not a crash.
+  try { clean = decodeURIComponent(urlPath.split('?')[0]); } catch { return null; }
+  const target = path.resolve(root, `.${path.sep}${clean}`);
+  if (target !== root && !inside(target)) return null;
   for (const candidate of [target, `${target}.html`, path.join(target, 'index.html')]) {
+    if (!inside(candidate)) continue;
     try {
       if (fs.statSync(candidate).isFile()) return candidate;
     } catch { /* try the next one */ }
@@ -41,13 +52,14 @@ function resolveFile(urlPath) {
   return null;
 }
 
-http.createServer((req, res) => {
+const server = http.createServer((req, res) => {
   const file = resolveFile(req.url || '/');
   if (file) return send(res, 200, file);
   const index = path.join(root, 'index.html');
-  if (spa && !path.extname(req.url.split('?')[0]) && fs.existsSync(index)) return send(res, 200, index);
+  if (spa && !path.extname((req.url || '/').split('?')[0]) && fs.existsSync(index)) return send(res, 200, index);
   const notFound = path.join(root, '404.html');
   if (fs.existsSync(notFound)) return send(res, 404, notFound);
   res.writeHead(404, { 'content-type': 'text/plain' });
   res.end('Not found');
-}).listen(port, '0.0.0.0', () => console.log(`static: ${root} on :${port}${spa ? ' (spa)' : ''}`));
+});
+server.listen(port, '0.0.0.0', () => console.log(`static: ${root} on :${server.address().port}${spa ? ' (spa)' : ''}`));

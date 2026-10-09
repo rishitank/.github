@@ -105,8 +105,52 @@ export class Collector {
     // moment of the error (the explorer), rather than to a label the caller
     // set (the crawler, which adds "(phone)" and similar).
     this.live = false;
-    // Set while the crawler submits a form with dummy data.
-    this.expectClientErrors = false;
+    // Set while the crawler (or the sign-in) submits a form with dummy data.
+    // Only the requests that submission sends are recorded as its own, and a
+    // 4xx answering one of those is expected (validation, a wrong password).
+    // Unrelated requests in the same window (polling, analytics, lazy
+    // chunks) are judged as usual.
+    this.submission = null;
+    this.submissionRequests = new WeakSet();
+  }
+
+  // Marks the start of a form submission on `page`. `action` is the form's
+  // resolved action URL (if any); `values` are the dummy values typed into it.
+  beginSubmission(page, { action = '', values = [] } = {}) {
+    let actionPath = '';
+    try { actionPath = action ? new URL(action).pathname : ''; } catch { /* no usable action */ }
+    this.submission = { page, actionPath, values: values.filter((v) => typeof v === 'string' && v.length >= 3) };
+  }
+
+  endSubmission() {
+    this.submission = null;
+  }
+
+  // A request belongs to the submission in progress when it is the
+  // navigation the submission caused, a non-GET fetch/XHR (a form handler
+  // posting its data), or a fetch/XHR to the form's action or carrying a value
+  // that was typed into the form. Ownership is recorded on the request itself,
+  // so a response that arrives after the crawler has moved on is still judged
+  // as an answer to the form.
+  ownsRequest(req) {
+    const sub = this.submission;
+    if (!sub || !sameOrigin(req.url(), this.baseUrl)) return false;
+    try { if (req.frame().page() !== sub.page) return false; } catch { return false; }
+    const type = req.resourceType();
+    if (type === 'document') return req.isNavigationRequest() && req.frame() === sub.page.mainFrame();
+    if (type !== 'fetch' && type !== 'xhr') return false;
+    if (req.method() !== 'GET') return true;
+    let u;
+    try { u = new URL(req.url()); } catch { return false; }
+    if (sub.actionPath && u.pathname === sub.actionPath) return true;
+    let query = u.search;
+    try { query = decodeURIComponent(u.search.replace(/\+/g, ' ')); } catch { /* keep it encoded */ }
+    return sub.values.some((v) => query.includes(v));
+  }
+
+  answersSubmission(req) {
+    for (let r = req; r; r = r.redirectedFrom()) if (this.submissionRequests.has(r)) return true;
+    return false;
   }
 
   ignored(text) {
@@ -128,6 +172,9 @@ export class Collector {
 
   attachPage(page) {
     const at = () => (this.live ? { page: page.url() } : {});
+    page.on('request', (req) => {
+      if (this.ownsRequest(req)) this.submissionRequests.add(req);
+    });
     page.on('pageerror', (err) => {
       const text = `${err.name || 'Error'}: ${err.message}`;
       if (this.ignored(text)) return;
@@ -170,7 +217,7 @@ export class Collector {
       const isDoc = res.request().resourceType() === 'document';
       // A 4xx answering a form the crawler just submitted with dummy data is
       // the app doing its job (validation, wrong password): report, don't fail.
-      const duringForm = this.expectClientErrors && status < 500;
+      const duringForm = status < 500 && this.answersSubmission(res.request());
       this.add(isDoc ? 'http-error-page' : 'http-error-resource', `${status} ${res.request().method()} ${url}${duringForm ? ' (after submitting a form with dummy data)' : ''}`, {
         blocking: own && !duringForm,
         url,
