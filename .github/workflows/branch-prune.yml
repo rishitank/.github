@@ -19,14 +19,18 @@
 # repositories on the Free plan cannot protect branches at all. The setting is
 # read on every scanned (not archived, not forked) repository and, in apply
 # mode, turned on (then read back) only where every long-lived branch (keep
-# pattern, not the default branch) is protected by a rule. Otherwise it is
+# pattern, not the default branch) is verifiably protected from deletion: a
+# ruleset deletion rule, or classic branch protection that does not allow
+# deletions (a protected branch can still allow them). Otherwise it is
 # left off and reported as `unsafe` with the branch names; if it is already
-# on there, it is left on and reported as `at_risk` with a warning. Neither
-# fails the run. There is no opt-out: a safe repository where the setting was
-# turned off by hand is turned back on, and the report says so. A setting the
-# token cannot read or change is reported as unknown with a warning and does
-# not fail the run; a change that fails for any other reason does, like a
-# failed deletion. Full rules: the script's header, or `--help`.
+# on there, it is left on and reported as `at_risk` with a warning. A branch
+# whose protection cannot be read makes the repository `unknown`, and the
+# setting is never turned on over it. None of these fails the run. There is
+# no opt-out: a safe repository where the setting was turned off by hand is
+# turned back on, and the report says so. A setting the token cannot read or
+# change is reported as unknown with a warning and does not fail the run; a
+# change that fails for any other reason does, like a failed deletion. Full
+# rules: the script's header, or `--help`.
 #
 # DRY RUN BY DEFAULT. The nightly run only reports, unless the repository
 # variable PRUNE_APPLY is exactly `true`. A hand-run follows its `mode` input,
@@ -92,13 +96,13 @@ jobs:
             echo "3. Repository permissions:"
             echo "   - **Contents: Read and write** (read branches; delete refs in apply mode; GitHub only shows merge settings to a token with it)"
             echo "   - **Pull requests: Read-only** (which branches were merged)"
-            echo "   - **Administration: Read and write** (branch rules; turning on *Automatically delete head branches* in apply mode)"
+            echo "   - **Administration: Read and write** (reading branch protection; turning on *Automatically delete head branches* in apply mode)"
             echo "   - **Metadata: Read-only** (added automatically)"
             echo "4. Copy the token into this repository: Settings -> Secrets and variables -> Actions -> New repository secret, name \`PRUNE_TOKEN\`."
             echo "5. Run this workflow by hand with \`mode: dry-run\` and read the report: the branches it would delete, and the repositories where it would turn on *Automatically delete head branches*."
             echo "6. To let the nightly run delete and turn the setting on, add the repository variable \`PRUNE_APPLY\` = \`true\`."
             echo
-            echo "The setting is only turned on in repositories whose long-lived branches (\`develop\`, \`staging\`, \`release/*\`, \`deploy-*\`...) are protected, because GitHub would otherwise delete them when a pull request from one is merged. The report lists the rest as \`unsafe\` or \`at_risk\`."
+            echo "The setting is only turned on in repositories whose long-lived branches (\`develop\`, \`staging\`, \`release/*\`, \`deploy-*\`...) are protected from deletion (a ruleset deletion rule, or branch protection that does not allow deletions), because GitHub would otherwise delete them when a pull request from one is merged. The report lists the rest as \`unsafe\`, \`at_risk\` or \`unknown\`."
           } >> "${GITHUB_STEP_SUMMARY}"
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
