@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # prune-merged-branches.sh -- delete branches whose pull request was merged
 # (no other branch is ever deleted), and turn on "Automatically delete head
-# branches" so each repository cleans up after its own merges from then on.
-# Everything it will not delete or change is reported, with a reason.
+# branches" wherever every long-lived branch is protected, so those
+# repositories clean up after their own merges from then on. Everything it
+# will not delete or change is reported, with a reason.
 #
 # Usage:
 #   prune-merged-branches.sh (--org NAME | --user NAME) [--mode dry-run|apply]
@@ -25,20 +26,44 @@
 # Read.
 #
 # "Automatically delete head branches" (delete_branch_on_merge), for every
-# repository that passes rule 1 below:
+# repository that passes rule 1 below.
+#
+# GitHub's automatic deletion knows nothing of KEEP_RE. Its documentation
+# names only branch protection rules and repository rules (rulesets) as
+# things that stop a merged head branch being deleted; it does not say that
+# an open pull request based on the branch, or a long-lived name, keeps it.
+# So a merged develop -> main pull request deletes `develop` unless a rule
+# protects it, and private repositories on the Free plan cannot protect
+# branches at all. The setting is therefore only turned on where every
+# long-lived branch is already safe:
+#   - long-lived: a branch other than the default branch that matches KEEP_RE
+#     (the default branch is left out, as in rule 2: GitHub does not let a
+#     repository's default branch be deleted);
+#   - safe: the branch API reports it `protected`, or a ruleset applies a
+#     `deletion` rule to it (rule 8). A classic protection rule that allows
+#     deletions is not detected and counts as safe;
+#   - unsafe: anything else, including a ruleset lookup that fails.
+# Then, per repository:
 #   - read with GET repos/R, never from the repository list, which may omit
 #     it. A missing field is "unknown", never "off";
-#   - on: already_on. Off in dry-run: would_enable;
-#   - off in apply: PATCH repos/R with delete_branch_on_merge=true, then read
-#     it back. Only a read-back of true counts as enabled: a 2xx is a claim,
-#     the setting is the evidence;
-#   - a read that fails, or a PATCH refused with 403 (the token lacks
-#     Administration: Read and write), is unknown: a ::warning, never fatal,
-#     so a token without that permission does not turn every run red;
+#   - on, every long-lived branch safe: already_on;
+#   - on, some long-lived branch unsafe: at_risk. Left on (turning it off is
+#     a decision for a person), with a ::warning naming the branches;
+#   - off, some long-lived branch unsafe: unsafe. Left off and reported with
+#     the branch names. Not a failure: protect the branches, and the next run
+#     turns the setting on;
+#   - off, every long-lived branch safe, dry-run: would_enable;
+#   - off, every long-lived branch safe, apply: PATCH repos/R with
+#     delete_branch_on_merge=true, then read it back. Only a read-back of true
+#     counts as enabled: a 2xx is a claim, the setting is the evidence;
+#   - a read that fails, branches that cannot be listed, or a PATCH refused
+#     with 403 (the token lacks Administration: Read and write), is unknown: a
+#     ::warning, never fatal, so a token without that permission does not
+#     turn every run red;
 #   - any other PATCH failure, or a read-back that is not true, is failed and
 #     counts toward exit 1 like a failed deletion.
-# There is no per-repository opt-out: in apply mode a repository where the
-# setting was switched off by hand is switched back on, and reported.
+# There is no per-repository opt-out: in apply mode a safe repository where
+# the setting was switched off by hand is switched back on, and reported.
 #
 # A branch B in repository R is deletable only if ALL of these hold:
 #   1. R is not archived and not a fork;
@@ -67,7 +92,8 @@
 # Exit status: 0 done; 1 some repository could not be read, some deletion
 # failed, or the auto-delete setting failed to turn on (nothing unsafe
 # happened, but the sweep is incomplete); 2 bad usage or a missing dependency.
-# An unknown auto-delete setting alone does not make the exit status 1.
+# An unknown, unsafe or at_risk auto-delete setting alone does not make the
+# exit status 1.
 set -euo pipefail
 
 KEEP_RE='^(main|master|develop|staging|test|gh-pages|v[0-9][0-9.]*|deploy-.*|release/.*)$'
@@ -87,7 +113,11 @@ while [ $# -gt 0 ]; do
     --user) scope=user; owner="${2:-}"; shift 2 || fail_usage "--user needs a value" ;;
     --mode) mode="${2:-}"; shift 2 || fail_usage "--mode needs a value" ;;
     --report) report="${2:-}"; shift 2 || fail_usage "--report needs a value" ;;
-    -h|--help) sed -n '2,19p' "$0"; exit 0 ;;
+    -h|--help)
+      # The whole leading comment block: usage, permissions and every rule.
+      sed -n '2,/^[^#]/{/^#/p;}' "$0"
+      exit 0
+      ;;
     *) fail_usage "unknown argument '$1'" ;;
   esac
 done
@@ -185,7 +215,8 @@ live_tip() {
 }
 
 # settings_record REPO STATE DETAIL -- append one auto-delete result line.
-# STATE is already_on | enabled | would_enable | unknown | failed.
+# STATE is already_on | enabled | would_enable | unsafe | at_risk | unknown |
+# failed.
 settings_record() {
   jq -cn --arg repo "$1" --arg state "$2" --arg detail "$3" \
     '{repo: $repo, state: $state, detail: $detail}' >> "${work}/settings.jsonl"
@@ -210,17 +241,46 @@ auto_delete_state() {
   esac
 }
 
-# ensure_auto_delete REPO -- the auto-delete rules in the header. Records
-# exactly one settings line for REPO and never fails the sweep by itself.
+# unsafe_long_lived REPO DEFAULT_BRANCH BRANCHES_JSONL -> sets UNSAFE to the
+# long-lived branches GitHub's automatic deletion could remove, space
+# separated ("" when there are none). Rules in the header.
+unsafe_long_lived() {
+  UNSAFE=""
+  local name
+  # A file, not a process substitution: if jq fails, set -e stops the run
+  # instead of an empty list reading as "no long-lived branches".
+  jq -r --arg default "$2" --arg keep "${KEEP_RE}" \
+    'select(.name != $default and (.name | test($keep)) and (.protected != true)) | .name' \
+    "$3" > "${work}/long-lived.txt"
+  while IFS= read -r name <&5; do
+    rules_state "$1" "$(urlencode "${name}")"
+    [ "${RULES}" = deletion ] || UNSAFE="${UNSAFE:+${UNSAFE} }${name}"
+  done 5< "${work}/long-lived.txt"
+}
+
+# ensure_auto_delete REPO UNSAFE -- the auto-delete rules in the header.
+# UNSAFE is unsafe_long_lived's list. Records exactly one settings line for
+# REPO and never fails the sweep by itself.
 ensure_auto_delete() {
-  local repo="$1"
+  local repo="$1" unsafe="$2"
   auto_delete_state "${repo}"
   case "${AUTO_DELETE}" in
     true)
-      settings_record "${repo}" already_on "on"
+      if [ -n "${unsafe}" ]; then
+        echo "::warning title=prune-merged-branches::${repo}: auto-delete head branches is on but these long-lived branches are not protected, so merging a pull request from one deletes it: ${unsafe}"
+        settings_record "${repo}" at_risk "on; unprotected long-lived branches: ${unsafe}"
+      else
+        settings_record "${repo}" already_on "on"
+      fi
       return 0
       ;;
-    false) ;;
+    false)
+      if [ -n "${unsafe}" ]; then
+        echo "left off  ${repo}: unprotected long-lived branches: ${unsafe}"
+        settings_record "${repo}" unsafe "skipped: unprotected long-lived branches: ${unsafe}"
+        return 0
+      fi
+      ;;
     *)
       echo "::warning title=prune-merged-branches::${repo}: auto-delete head branches is unknown: ${AUTO_DELETE#unknown:}"
       settings_record "${repo}" unknown "${AUTO_DELETE#unknown:}"
@@ -296,18 +356,23 @@ while IFS= read -r line <&3; do
   default_branch=$(jq -r '.default_branch // ""' <<< "${line}")
   repos_scanned=$((repos_scanned + 1))
 
-  # ---- "Automatically delete head branches" -------------------------------
-  # Before the branches, so a repository whose branches cannot be listed (or
-  # that has none) still gets the setting checked.
-  ensure_auto_delete "${repo}"
-
   # ---- branches and pull requests, fully paginated ------------------------
   if ! api "${work}/branches.jsonl" --paginate "repos/${repo}/branches?per_page=100" \
     --jq '.[] | {name, sha: .commit.sha, protected}'; then
     echo "::warning title=prune-merged-branches::${repo}: could not list branches (${API_STATUS}); nothing in it was considered"
     jq -cn --arg repo "${repo}" --arg why "branches ${API_STATUS}: ${API_ERROR}" '{repo: $repo, reason: $why}' >> "${work}/unreadable.jsonl"
+    # Without the branches the long-lived ones cannot be checked, so the
+    # setting is neither judged nor changed.
+    settings_record "${repo}" unknown "branches could not be listed, so long-lived branches could not be checked"
     continue
   fi
+
+  # ---- "Automatically delete head branches" -------------------------------
+  # Before the pull requests, so a repository whose pull requests cannot be
+  # listed (or that has no branches) still gets the setting checked.
+  unsafe_long_lived "${repo}" "${default_branch}" "${work}/branches.jsonl"
+  ensure_auto_delete "${repo}" "${UNSAFE}"
+
   [ -s "${work}/branches.jsonl" ] || { echo "empty     ${repo}"; continue; }
 
   if ! api "${work}/prs.jsonl" --paginate "repos/${repo}/pulls?state=all&per_page=100" \
@@ -445,6 +510,8 @@ jq -n --arg mode "${mode}" --arg scope "${scope}" --arg owner "${owner}" --arg k
           already_on: n("already_on"),
           enabled: n("enabled"),
           would_enable: n("would_enable"),
+          unsafe: n("unsafe"),
+          at_risk: n("at_risk"),
           unknown: n("unknown"),
           failed: n("failed")
         }
@@ -485,7 +552,7 @@ jq -r '
    else empty end),
   "#### Auto-delete head branches",
   "",
-  "GitHub deletes a pull request'"'"'s head branch when it is merged once `delete_branch_on_merge` is on, so this sweep only has the backlog to clear.",
+  "GitHub deletes a pull request'"'"'s head branch when it is merged once `delete_branch_on_merge` is on, so this sweep only has the backlog to clear. GitHub does not apply the keep pattern: only a branch protection rule or a ruleset stops it. So the setting is only turned on where every long-lived branch (keep pattern, not the default branch) is protected. **unsafe**: left off until those branches are protected. **at_risk**: already on, and merging a pull request from one of the named branches deletes it.",
   "",
   "| Setting | Repositories |",
   "|---|---:|",

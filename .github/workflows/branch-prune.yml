@@ -1,11 +1,11 @@
 # Sweeps branches whose pull request was merged, across every repository this
-# account owns, and makes sure every one of them has "Automatically delete
-# head branches" (`delete_branch_on_merge`) turned on.
+# account owns, and turns on "Automatically delete head branches"
+# (`delete_branch_on_merge`) wherever that is safe.
 #
 # The setting only works going forward, so every branch from a PR merged
-# before it was switched on stays forever. With it on everywhere, new merges
-# clean up immediately and this sweep only mops up that backlog, and anything
-# the setting misses, under narrow rules: merged at the branch's current tip,
+# before it was switched on stays forever. With it on, new merges clean up
+# immediately and this sweep only mops up that backlog, and anything the
+# setting misses, under narrow rules: merged at the branch's current tip,
 # not the default branch, not protected, no deletion ruleset, no open PR on
 # it, not a long-lived name. Everything else is reported, never deleted. The
 # rules are in scripts/prune-merged-branches.sh. TanksterAI/.github runs an
@@ -13,12 +13,20 @@
 # repo-settings-reconcile job already enforces delete_branch_on_merge from
 # settings.yml.
 #
-# The setting is read on every scanned (not archived, not forked) repository;
-# in apply mode one that is off is turned on and read back. There is no
-# opt-out: a repository where it was turned off by hand is turned back on,
-# and the report says so. A setting the token cannot read or change is
-# reported as unknown with a warning and does not fail the run; a change that
-# fails for any other reason does, like a failed deletion.
+# SAFE ONLY. GitHub's automatic deletion ignores the sweep's keep pattern:
+# its docs name only branch protection rules and rulesets as stopping it, so
+# merging a develop -> main PR deletes an unprotected `develop`, and private
+# repositories on the Free plan cannot protect branches at all. The setting is
+# read on every scanned (not archived, not forked) repository and, in apply
+# mode, turned on (then read back) only where every long-lived branch (keep
+# pattern, not the default branch) is protected by a rule. Otherwise it is
+# left off and reported as `unsafe` with the branch names; if it is already
+# on there, it is left on and reported as `at_risk` with a warning. Neither
+# fails the run. There is no opt-out: a safe repository where the setting was
+# turned off by hand is turned back on, and the report says so. A setting the
+# token cannot read or change is reported as unknown with a warning and does
+# not fail the run; a change that fails for any other reason does, like a
+# failed deletion. Full rules: the script's header, or `--help`.
 #
 # DRY RUN BY DEFAULT. The nightly run only reports, unless the repository
 # variable PRUNE_APPLY is exactly `true`. A hand-run follows its `mode` input,
@@ -37,7 +45,8 @@ on:
       mode:
         description: >-
           dry-run reports what would be deleted or turned on; apply deletes it
-          and turns on auto-delete of head branches.
+          and turns on auto-delete of head branches where long-lived branches
+          are protected.
         type: choice
         options:
           - dry-run
@@ -88,6 +97,8 @@ jobs:
             echo "4. Copy the token into this repository: Settings -> Secrets and variables -> Actions -> New repository secret, name \`PRUNE_TOKEN\`."
             echo "5. Run this workflow by hand with \`mode: dry-run\` and read the report: the branches it would delete, and the repositories where it would turn on *Automatically delete head branches*."
             echo "6. To let the nightly run delete and turn the setting on, add the repository variable \`PRUNE_APPLY\` = \`true\`."
+            echo
+            echo "The setting is only turned on in repositories whose long-lived branches (\`develop\`, \`staging\`, \`release/*\`, \`deploy-*\`...) are protected, because GitHub would otherwise delete them when a pull request from one is merged. The report lists the rest as \`unsafe\` or \`at_risk\`."
           } >> "${GITHUB_STEP_SUMMARY}"
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
