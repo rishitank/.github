@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# prune-merged-branches.sh -- delete branches whose pull request was merged,
-# and nothing else. Everything it will not delete is reported, with a reason.
+# prune-merged-branches.sh -- delete branches whose pull request was merged
+# (no other branch is ever deleted), and turn on "Automatically delete head
+# branches" so each repository cleans up after its own merges from then on.
+# Everything it will not delete or change is reported, with a reason.
 #
 # Usage:
 #   prune-merged-branches.sh (--org NAME | --user NAME) [--mode dry-run|apply]
@@ -9,11 +11,34 @@
 #   --org NAME    every repository of organisation NAME (orgs/NAME/repos?type=all)
 #   --user NAME   every repository the token's user owns (user/repos?affiliation=owner),
 #                 filtered to owner NAME
-#   --mode        dry-run (the default) reports only; apply also deletes
+#   --mode        dry-run (the default) reports only; apply also deletes and
+#                 turns the auto-delete setting on
 #   --report      JSON report path (default: branch-prune-report.json)
 #
 # Needs gh and jq, and GH_TOKEN (or a logged-in gh). Writes a markdown table to
 # $GITHUB_STEP_SUMMARY when that is set, and to stdout otherwise.
+#
+# Token permissions (fine-grained): Contents: Read and write (branches, ref
+# deletion, and GitHub only shows a repository's merge settings to a token
+# that can write contents); Pull requests: Read; Administration: Read and
+# write (branch rules, and PATCH repos/R to turn the setting on); Metadata:
+# Read.
+#
+# "Automatically delete head branches" (delete_branch_on_merge), for every
+# repository that passes rule 1 below:
+#   - read with GET repos/R, never from the repository list, which may omit
+#     it. A missing field is "unknown", never "off";
+#   - on: already_on. Off in dry-run: would_enable;
+#   - off in apply: PATCH repos/R with delete_branch_on_merge=true, then read
+#     it back. Only a read-back of true counts as enabled: a 2xx is a claim,
+#     the setting is the evidence;
+#   - a read that fails, or a PATCH refused with 403 (the token lacks
+#     Administration: Read and write), is unknown: a ::warning, never fatal,
+#     so a token without that permission does not turn every run red;
+#   - any other PATCH failure, or a read-back that is not true, is failed and
+#     counts toward exit 1 like a failed deletion.
+# There is no per-repository opt-out: in apply mode a repository where the
+# setting was switched off by hand is switched back on, and reported.
 #
 # A branch B in repository R is deletable only if ALL of these hold:
 #   1. R is not archived and not a fork;
@@ -39,9 +64,10 @@
 # where 422 and 404 mean "already gone". Every outcome is then confirmed by
 # reading the ref back: a ref that still exists is a failure, never a success.
 #
-# Exit status: 0 done; 1 some repository could not be read or some deletion
-# failed (nothing unsafe happened, but the sweep is incomplete); 2 bad usage or
-# a missing dependency.
+# Exit status: 0 done; 1 some repository could not be read, some deletion
+# failed, or the auto-delete setting failed to turn on (nothing unsafe
+# happened, but the sweep is incomplete); 2 bad usage or a missing dependency.
+# An unknown auto-delete setting alone does not make the exit status 1.
 set -euo pipefail
 
 KEEP_RE='^(main|master|develop|staging|test|gh-pages|v[0-9][0-9.]*|deploy-.*|release/.*)$'
@@ -61,7 +87,7 @@ while [ $# -gt 0 ]; do
     --user) scope=user; owner="${2:-}"; shift 2 || fail_usage "--user needs a value" ;;
     --mode) mode="${2:-}"; shift 2 || fail_usage "--mode needs a value" ;;
     --report) report="${2:-}"; shift 2 || fail_usage "--report needs a value" ;;
-    -h|--help) sed -n '2,15p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,19p' "$0"; exit 0 ;;
     *) fail_usage "unknown argument '$1'" ;;
   esac
 done
@@ -87,6 +113,7 @@ trap 'rm -rf "${work}"' EXIT
 : > "${work}/results.jsonl"
 : > "${work}/skipped.jsonl"
 : > "${work}/unreadable.jsonl"
+: > "${work}/settings.jsonl"
 
 # api OUTFILE ARGS... -- gh api, body to OUTFILE. On failure returns 1 and sets
 # API_STATUS to the HTTP status (or "error" when there is none) and API_ERROR
@@ -157,6 +184,80 @@ live_tip() {
   fi
 }
 
+# settings_record REPO STATE DETAIL -- append one auto-delete result line.
+# STATE is already_on | enabled | would_enable | unknown | failed.
+settings_record() {
+  jq -cn --arg repo "$1" --arg state "$2" --arg detail "$3" \
+    '{repo: $repo, state: $state, detail: $detail}' >> "${work}/settings.jsonl"
+}
+
+# auto_delete_state REPO -> sets AUTO_DELETE to true | false | unknown:<why>
+auto_delete_state() {
+  AUTO_DELETE=""
+  if ! api "${work}/repo.json" "repos/$1"; then
+    AUTO_DELETE="unknown:GET repos/$1 ${API_STATUS}: ${API_ERROR}"
+    return 0
+  fi
+  # Only a JSON boolean counts. GitHub leaves merge settings out of the
+  # response for a token without Contents: Read and write, and an absent
+  # field must not read as "off".
+  case "$(jq -r '.delete_branch_on_merge | if type == "boolean" then tostring else "missing" end' \
+    "${work}/repo.json" 2>/dev/null || echo unparseable)" in
+    true) AUTO_DELETE=true ;;
+    false) AUTO_DELETE=false ;;
+    missing) AUTO_DELETE="unknown:delete_branch_on_merge not in GET repos/$1 (GitHub returns it only to a token with Contents: Read and write)" ;;
+    *) AUTO_DELETE="unknown:unparseable GET repos/$1 response" ;;
+  esac
+}
+
+# ensure_auto_delete REPO -- the auto-delete rules in the header. Records
+# exactly one settings line for REPO and never fails the sweep by itself.
+ensure_auto_delete() {
+  local repo="$1"
+  auto_delete_state "${repo}"
+  case "${AUTO_DELETE}" in
+    true)
+      settings_record "${repo}" already_on "on"
+      return 0
+      ;;
+    false) ;;
+    *)
+      echo "::warning title=prune-merged-branches::${repo}: auto-delete head branches is unknown: ${AUTO_DELETE#unknown:}"
+      settings_record "${repo}" unknown "${AUTO_DELETE#unknown:}"
+      return 0
+      ;;
+  esac
+
+  if [ "${mode}" != apply ]; then
+    echo "would set ${repo}: delete_branch_on_merge=true"
+    settings_record "${repo}" would_enable "off; dry run, not changed"
+    return 0
+  fi
+
+  # -F sends a JSON boolean, not the string "true".
+  if ! api "${work}/patch.json" -X PATCH "repos/${repo}" -F delete_branch_on_merge=true; then
+    if [ "${API_STATUS}" = 403 ]; then
+      echo "::warning title=prune-merged-branches::${repo}: auto-delete head branches is off and the token may not turn it on (PATCH 403); PRUNE_TOKEN needs Administration: Read and write"
+      settings_record "${repo}" unknown "off; PATCH 403, token needs Administration: Read and write: ${API_ERROR}"
+    else
+      echo "::warning title=prune-merged-branches::${repo}: could not turn on auto-delete head branches: PATCH ${API_STATUS}: ${API_ERROR}"
+      settings_record "${repo}" failed "PATCH ${API_STATUS}: ${API_ERROR}"
+    fi
+    return 0
+  fi
+
+  # Read back. GitHub can answer a settings PATCH with 2xx and keep the old
+  # value; only the setting itself says it changed.
+  auto_delete_state "${repo}"
+  if [ "${AUTO_DELETE}" = true ]; then
+    echo "enabled   ${repo}: delete_branch_on_merge"
+    settings_record "${repo}" enabled "turned on, read back true"
+  else
+    echo "::warning title=prune-merged-branches::${repo}: PATCH delete_branch_on_merge=true succeeded but the read-back is ${AUTO_DELETE}"
+    settings_record "${repo}" failed "PATCH succeeded but read-back is ${AUTO_DELETE}"
+  fi
+}
+
 echo "prune-merged-branches: ${scope} ${owner}, mode ${mode}"
 echo
 
@@ -194,6 +295,11 @@ while IFS= read -r line <&3; do
   fi
   default_branch=$(jq -r '.default_branch // ""' <<< "${line}")
   repos_scanned=$((repos_scanned + 1))
+
+  # ---- "Automatically delete head branches" -------------------------------
+  # Before the branches, so a repository whose branches cannot be listed (or
+  # that has none) still gets the setting checked.
+  ensure_auto_delete "${repo}"
 
   # ---- branches and pull requests, fully paginated ------------------------
   if ! api "${work}/branches.jsonl" --paginate "repos/${repo}/branches?per_page=100" \
@@ -317,10 +423,13 @@ jq -n --arg mode "${mode}" --arg scope "${scope}" --arg owner "${owner}" --arg k
   --argjson scanned "${repos_scanned}" \
   --slurpfile results "${work}/results.jsonl" \
   --slurpfile skipped "${work}/skipped.jsonl" \
-  --slurpfile unreadable "${work}/unreadable.jsonl" '
+  --slurpfile unreadable "${work}/unreadable.jsonl" \
+  --slurpfile settings "${work}/settings.jsonl" '
   ($results | map(select(.category == "deletable")) | sort_by(.repo, .branch)) as $del
   | ($results | map(select(.category != "deletable")) | sort_by(.category, .repo, .branch)) as $keep
-  | {
+  | ($settings | sort_by(.repo)) as $set
+  | def n($s): $set | map(select(.state == $s)) | length;
+  {
       generated_at: (now | todate),
       mode: $mode, scope: $scope, owner: $owner, keep_pattern: $keep,
       counts: {
@@ -331,10 +440,18 @@ jq -n --arg mode "${mode}" --arg scope "${scope}" --arg owner "${owner}" --arg k
         deleted: ($del | map(select(.result == "deleted")) | length),
         already_gone: ($del | map(select(.result == "already-gone")) | length),
         failed: ($del | map(select(.result == "failed")) | length),
-        report_only: ($keep | group_by(.category) | map({key: .[0].category, value: length}) | from_entries)
+        report_only: ($keep | group_by(.category) | map({key: .[0].category, value: length}) | from_entries),
+        settings: {
+          already_on: n("already_on"),
+          enabled: n("enabled"),
+          would_enable: n("would_enable"),
+          unknown: n("unknown"),
+          failed: n("failed")
+        }
       },
       deletable: $del,
       report_only: $keep,
+      settings: $set,
       repos_skipped: $skipped,
       repos_unreadable: $unreadable
     }' > "${report}"
@@ -345,7 +462,7 @@ jq -r '
   "### Merged-branch prune (\(.mode))",
   "",
   "`\(.scope)` **\(.owner)** -- \(.counts.repos_scanned) repositories scanned, \(.counts.repos_skipped) skipped (archived/fork), \(.counts.repos_unreadable) unreadable.",
-  (if .mode == "apply" then "" else "Dry run: nothing was deleted." end),
+  (if .mode == "apply" then "" else "Dry run: nothing was deleted or changed." end),
   "",
   "| Category | Branches |",
   "|---|---:|",
@@ -366,6 +483,24 @@ jq -r '
      (.repos_unreadable[] | "- \(.repo | cell): \(.reason | cell)"),
      ""
    else empty end),
+  "#### Auto-delete head branches",
+  "",
+  "GitHub deletes a pull request'"'"'s head branch when it is merged once `delete_branch_on_merge` is on, so this sweep only has the backlog to clear.",
+  "",
+  "| Setting | Repositories |",
+  "|---|---:|",
+  (.counts.settings | to_entries[] | "| \(.key) | \(.value) |"),
+  "",
+  (if (.settings | map(select(.state != "already_on")) | length) > 0 then
+     "| Repository | State | Detail |",
+     "|---|---|---|",
+     (.settings[] | select(.state != "already_on") | "| \(.repo | cell) | \(.state) | \(.detail | cell) |"),
+     ""
+   else "On in every scanned repository.", "" end),
+  (if .counts.settings.unknown > 0 then
+     "Unknown means the setting could not be read, or could not be changed for lack of permission. `PRUNE_TOKEN` needs **Administration: Read and write** to turn it on and **Contents: Read and write** to read it.",
+     ""
+   else empty end),
   "<details><summary>Report only (\(.report_only | length))</summary>",
   "",
   "| Repository | Branch | Category | Reason | Last commit |",
@@ -380,7 +515,12 @@ echo
 echo "counts: ${counts}"
 echo "report: ${report}"
 
-if [ "$(jq '.counts.repos_unreadable + .counts.failed' "${report}")" -gt 0 ]; then
-  echo "::error title=prune-merged-branches::incomplete: $(jq -r '.counts.repos_unreadable' "${report}") repositories unreadable, $(jq -r '.counts.failed' "${report}") deletions failed"
+# Unknown settings warn, once here and per repository above, but never fail
+# the run: without the permission the branch sweep is still complete.
+if [ "$(jq '.counts.settings.unknown' "${report}")" -gt 0 ]; then
+  echo "::warning title=prune-merged-branches::auto-delete head branches unknown on $(jq -r '.counts.settings.unknown' "${report}") repositories; PRUNE_TOKEN needs Administration: Read and write to turn it on (and Contents: Read and write to read it)"
+fi
+if [ "$(jq '.counts.repos_unreadable + .counts.failed + .counts.settings.failed' "${report}")" -gt 0 ]; then
+  echo "::error title=prune-merged-branches::incomplete: $(jq -r '.counts.repos_unreadable' "${report}") repositories unreadable, $(jq -r '.counts.failed' "${report}") deletions failed, $(jq -r '.counts.settings.failed' "${report}") auto-delete settings failed to turn on"
   exit 1
 fi
