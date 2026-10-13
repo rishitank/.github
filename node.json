@@ -23,10 +23,11 @@
       "minimumReleaseAge": "14 days"
     },
     {
-      "description": "Test tooling is safe to take quickly; a break shows up immediately and only in CI.",
+      "description": "Test tooling is safe to take quickly; a break shows up immediately and only in CI. Rides in the monthly automerge group.",
       "matchPackageNames": ["vitest", "@vitest/**", "@playwright/test", "playwright"],
       "matchUpdateTypes": ["minor", "patch"],
-      "groupName": "test tooling",
+      "groupName": "non-major (automerge)",
+      "groupSlug": "non-major-automerge",
       "automerge": true
     }
   ]
