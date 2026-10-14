@@ -26,25 +26,34 @@ permissions:
   contents: read
 
 jobs:
-  # osv-scanner over the runtime-gate action's package-lock.json, and
-  # gitleaks over this repository's full history. The ecosystem audit is
-  # weekly and on demand by design, so on a pull request this checks that it
-  # is skipped and the Verdict step still reports.
+  # osv-scanner over the runtime-gate action's package-lock.json, gitleaks
+  # over this repository's full history, and the Verdict step. The ecosystem
+  # audit steps are not exercised: this repository has no npm, Python or Rust
+  # project at its root, so the default ecosystem (none) skips them.
+  #
+  # runs-on is pinned to GitHub-hosted runners for both jobs: this repository
+  # is public, python-ci evals its commands, and a pull request from a fork
+  # must never reach the self-hosted runner that vars.CI_RUNNER may select.
+  # Hosted minutes are free here.
   security:
     name: security
     uses: ./.github/workflows/security.yml
     permissions:
       contents: read
+    with:
+      runs-on: ubuntu-latest
 
-  # Every step of the single verify job, strict: ruff check, ruff format,
-  # mypy, then the verify command, then the verdict. The fixture is clean, so
-  # any failure is the workflow's, not the code's.
+  # Every lint, typecheck and verify step of the single verify job, strict:
+  # ruff check, ruff format, mypy, the verify command and the verdict. The
+  # sibling-repo and extra-install steps are not exercised. The fixture is
+  # clean, so any failure is the workflow's, not the code's.
   python-ci:
     name: python-ci
     uses: ./.github/workflows/python-ci.yml
     permissions:
       contents: read
     with:
+      runs-on: ubuntu-latest
       install: python -m pip --version
       verify: python tests/python-ci/check.py
       lint-strict: true
