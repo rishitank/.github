@@ -34,8 +34,7 @@ jobs:
     runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 5
     permissions:
-      # Writing refs/tags/* is a contents write.
-      contents: write
+      contents: write # writing refs/tags/* is a contents write
     steps:
       - name: Move
         env:
@@ -53,7 +52,10 @@ jobs:
 
           # Always resolve to a full commit SHA: the input may be a short SHA
           # or a ref name, and the refs API documents only full SHAs.
-          SHA=$(gh api "repos/${REPO}/commits/${WANT:-main}" --jq .sha)
+          SHA=$(gh api "repos/${REPO}/commits/${WANT:-main}" --jq .sha) || {
+            echo "::error::Could not resolve '${WANT:-main}' to a commit."
+            exit 1
+          }
           if [[ ! "${SHA}" =~ ^[0-9a-f]{40}$ ]]; then
             echo "::error::Could not resolve '${WANT:-main}' to a commit."
             exit 1
@@ -70,13 +72,20 @@ jobs:
               ;;
           esac
 
-          if old=$(gh api "repos/${REPO}/git/ref/tags/${TAG}" --jq .object.sha 2>/dev/null); then
+          # Create the tag only when it is genuinely missing (404); any other
+          # failure to read it (a 5xx, a rate limit) stops here instead of
+          # being mistaken for "missing".
+          if old=$(gh api "repos/${REPO}/git/ref/tags/${TAG}" --jq .object.sha 2>/tmp/ref.err); then
             gh api -X PATCH "repos/${REPO}/git/refs/tags/${TAG}" \
               -f sha="${SHA}" -F force=true --silent
-          else
+          elif grep -q "HTTP 404" /tmp/ref.err; then
             old="(none)"
             gh api -X POST "repos/${REPO}/git/refs" \
               -f ref="refs/tags/${TAG}" -f sha="${SHA}" --silent
+          else
+            cat /tmp/ref.err >&2
+            echo "::error::Could not read refs/tags/${TAG}; not moving it."
+            exit 1
           fi
 
           echo "${TAG}: ${old} -> ${SHA}" | tee -a "${GITHUB_STEP_SUMMARY}"
