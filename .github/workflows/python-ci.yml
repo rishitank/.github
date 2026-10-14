@@ -112,7 +112,11 @@ jobs:
     permissions:
       contents: read
     steps:
+      # No persisted token: Install runs the package's (and its
+      # dependencies') build code, which must not find it in .git/config.
       - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-python@v7.0.0
         with:
@@ -157,6 +161,7 @@ jobs:
           repository: ${{ inputs.sibling-repo }}
           token: ${{ secrets.ci-token }}
           path: _sibling
+          persist-credentials: false
 
       - name: Install sibling
         id: sibling_install

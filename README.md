@@ -185,8 +185,9 @@ consuming repo:
   `concurrency` with `cancel-in-progress: true`, keyed on the caller's ref.
 - **No duplicate runs.** Merges are squash-only from up-to-date branches, so a
   `push: main` run re-checks a tree the pull request already checked. Keep a
-  push trigger only where something needs it: a deploy, a visual baseline, or
-  `rust-ci.yml`, whose release build runs only off pull requests.
+  push trigger only where something needs it: a deployment, a visual
+  baseline, or `rust-ci.yml`, whose release build follows the caller's trigger
+  and `build-release` input.
 - **Schedules weekly at most** unless the job is the product.
 - **Reference this repository at `@v1`**, never by SHA: a SHA pin turns every
   change into a pull request in every consuming repository.
