@@ -55,7 +55,9 @@ on:
         type: boolean
         default: false
       lint-paths:
-        description: Paths ruff should look at.
+        description: >-
+          Paths ruff should look at. Whitespace-separated (newlines too); no
+          globs, quotes or variables -- ruff expands directories itself.
         type: string
         default: "."
       ruff-version:
@@ -73,7 +75,9 @@ on:
         type: boolean
         default: false
       typecheck-paths:
-        description: Paths mypy should look at.
+        description: >-
+          Paths mypy should look at. Whitespace-separated (newlines too); no
+          globs, quotes or variables.
         type: string
         default: "."
       sibling-repo:
@@ -111,14 +115,19 @@ jobs:
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       contents: read
+    # The steps use bash (pipefail, arrays, here-strings): say so, rather
+    # than rely on the runner's default shell.
+    defaults:
+      run:
+        shell: bash
     steps:
       # No persisted token: Install runs the package's (and its
       # dependencies') build code, which must not find it in .git/config.
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - uses: actions/setup-python@v7.0.0
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ inputs.python-version }}
 
@@ -142,13 +151,24 @@ jobs:
         id: ruff_check
         if: inputs.lint && steps.ruff_install.outcome == 'success'
         continue-on-error: true
-        run: ruff check --output-format=github ${{ inputs.lint-paths }}
+        # Paths arrive through env and are split on whitespace, newlines
+        # included (read -d '' -a, which does not glob), never expanded into
+        # the script by ${{ }}.
+        run: |
+          read -r -d '' -a paths <<< "${LINT_PATHS}" || true
+          ruff check --output-format=github "${paths[@]}"
+        env:
+          LINT_PATHS: ${{ inputs.lint-paths }}
 
       - name: ruff format --check
         id: ruff_format
         if: inputs.lint && steps.ruff_install.outcome == 'success'
         continue-on-error: true
-        run: ruff format --check --diff ${{ inputs.lint-paths }}
+        run: |
+          read -r -d '' -a paths <<< "${LINT_PATHS}" || true
+          ruff format --check --diff "${paths[@]}"
+        env:
+          LINT_PATHS: ${{ inputs.lint-paths }}
 
       # continue-on-error is deliberate: a missing token is an infrastructure
       # problem, not a reason to fail the contributor's PR.
@@ -156,7 +176,7 @@ jobs:
         id: sibling
         if: inputs.sibling-repo != ''
         continue-on-error: true
-        uses: actions/checkout@v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ inputs.sibling-repo }}
           token: ${{ secrets.ci-token }}
@@ -172,7 +192,7 @@ jobs:
             echo "state=missing-token" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          ${{ inputs.sibling-install }}
+          eval "${PYCI_SIBLING_INSTALL}"
           if [ -z "${PROBE}" ]; then
             echo "state=ok" >> "$GITHUB_OUTPUT"
           elif python -c "import ${PROBE}" 2>/dev/null; then
@@ -181,18 +201,25 @@ jobs:
             echo "state=too-old" >> "$GITHUB_OUTPUT"
           fi
         env:
+          PYCI_SIBLING_INSTALL: ${{ inputs.sibling-install }}
           PROBE: ${{ inputs.sibling-probe-module }}
 
+      # The commands are the caller's, by design, so they are run with eval;
+      # they arrive through env, never expanded into the script by ${{ }}.
       - name: Install
         run: |
           set -euo pipefail
-          ${{ inputs.install }}
+          eval "${PYCI_INSTALL}"
+        env:
+          PYCI_INSTALL: ${{ inputs.install }}
 
       - name: Extra install
         if: inputs.extra-install != ''
         run: |
           set -euo pipefail
-          ${{ inputs.extra-install }}
+          eval "${PYCI_EXTRA_INSTALL}"
+        env:
+          PYCI_EXTRA_INSTALL: ${{ inputs.extra-install }}
 
       - name: mypy
         id: mypy
@@ -201,30 +228,39 @@ jobs:
         run: |
           set -euo pipefail
           python -m pip install mypy
+          read -r -d '' -a paths <<< "${TYPECHECK_PATHS}" || true
           # _sibling is a checkout of another repo, not this one's code.
-          mypy --exclude '^_sibling/' ${{ inputs.typecheck-paths }}
+          mypy --exclude '^_sibling/' "${paths[@]}"
+        env:
+          TYPECHECK_PATHS: ${{ inputs.typecheck-paths }}
 
       - name: Verify
         run: |
           set -euo pipefail
-          ${{ inputs.verify }}
+          eval "${PYCI_VERIFY}"
+        env:
+          PYCI_VERIFY: ${{ inputs.verify }}
 
       - name: Report integration coverage
         if: always() && inputs.sibling-repo != ''
         run: |
-          case "${{ steps.sibling_install.outputs.state }}" in
+          case "${STATE}" in
             ok)
-              echo "Full suite: \`${{ inputs.sibling-repo }}\` present, integration checks ran." >> "$GITHUB_STEP_SUMMARY"
+              echo "Full suite: \`${SIBLING}\` present, integration checks ran." >> "$GITHUB_STEP_SUMMARY"
               ;;
             too-old)
-              echo "::warning title=Integration checks skipped::${{ inputs.sibling-repo }} is installed but does not expose ${{ inputs.sibling-probe-module }}. Unit checks only."
-              echo "Partial suite: \`${{ inputs.sibling-repo }}\` is too old (no \`${{ inputs.sibling-probe-module }}\`). Unit checks only." >> "$GITHUB_STEP_SUMMARY"
+              echo "::warning title=Integration checks skipped::${SIBLING} is installed but does not expose ${PROBE}. Unit checks only."
+              echo "Partial suite: \`${SIBLING}\` is too old (no \`${PROBE}\`). Unit checks only." >> "$GITHUB_STEP_SUMMARY"
               ;;
             *)
-              echo "::warning title=Integration checks skipped::${{ inputs.sibling-repo }} could not be checked out. Check the ci-token secret."
-              echo "Partial suite: \`${{ inputs.sibling-repo }}\` could not be checked out. Check the \`ci-token\` secret. Unit checks only." >> "$GITHUB_STEP_SUMMARY"
+              echo "::warning title=Integration checks skipped::${SIBLING} could not be checked out. Check the ci-token secret."
+              echo "Partial suite: \`${SIBLING}\` could not be checked out. Check the \`ci-token\` secret. Unit checks only." >> "$GITHUB_STEP_SUMMARY"
               ;;
           esac
+        env:
+          STATE: ${{ steps.sibling_install.outputs.state }}
+          SIBLING: ${{ inputs.sibling-repo }}
+          PROBE: ${{ inputs.sibling-probe-module }}
 
       - name: Lint and typecheck verdict
         if: always() && (inputs.lint || inputs.typecheck)
