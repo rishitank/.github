@@ -5,9 +5,9 @@
 # full refs/tags/ path: this repository also has a stale branch named v1). This
 # exists so it can be done without a local clone, and so the move is recorded
 # in the Actions log with the old and new commit side by side. It is a copy of
-# TanksterAI/.github's move-major-tag.yml, kept permanently this time (a
-# temporary one was removed in 3978d59, which left no way to move the tag
-# without a clone).
+# TanksterAI/.github's move-major-tag.yml, plus annotated-tag handling in the
+# summary, kept permanently this time (a temporary one was removed in 3978d59,
+# which left no way to move the tag without a clone).
 name: move-major-tag
 
 on:
@@ -75,7 +75,16 @@ jobs:
           # Create the tag only when it is genuinely missing (404); any other
           # failure to read it (a 5xx, a rate limit) stops here instead of
           # being mistaken for "missing".
-          if old=$(gh api "repos/${REPO}/git/ref/tags/${TAG}" --jq .object.sha 2>/tmp/ref.err); then
+          if ref=$(gh api "repos/${REPO}/git/ref/tags/${TAG}" \
+              --jq '.object.type + " " + .object.sha' 2>/tmp/ref.err); then
+            read -r type old <<< "${ref}"
+            # An annotated tag's ref points at a tag object, not a commit:
+            # follow it, so the summary records the commit it is moving from.
+            while [ "${type}" = "tag" ]; do
+              ref=$(gh api "repos/${REPO}/git/tags/${old}" \
+                --jq '.object.type + " " + .object.sha')
+              read -r type old <<< "${ref}"
+            done
             gh api -X PATCH "repos/${REPO}/git/refs/tags/${TAG}" \
               -f sha="${SHA}" -F force=true --silent
           elif grep -q "HTTP 404" /tmp/ref.err; then
