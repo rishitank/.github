@@ -1,0 +1,55 @@
+# Runs the shared security and python-ci workflows on this repository, on the
+# pull request that changes them, before v1 moves and every consuming
+# repository picks the change up.
+#
+# Why here: every consuming repository is private, and their Actions minutes
+# are the scarce ones. This repository is public, so these runs cost nothing,
+# and a broken change fails here instead of in fifteen private repositories.
+# Only pull requests that touch the workflows under test (or this file, or
+# its fixture) run it, so it adds nothing to unrelated pull requests.
+name: reusable-selftest
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/security.yml"
+      - ".github/workflows/python-ci.yml"
+      - ".github/workflows/reusable-selftest.yml"
+      - "tests/python-ci/**"
+  workflow_dispatch:
+
+concurrency:
+  group: reusable-selftest-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # osv-scanner over the runtime-gate action's package-lock.json, and
+  # gitleaks over this repository's full history. The ecosystem audit is
+  # weekly and on demand by design, so on a pull request this checks that it
+  # is skipped and the Verdict step still reports.
+  security:
+    name: security
+    uses: ./.github/workflows/security.yml
+    permissions:
+      contents: read
+
+  # Every step of the single verify job, strict: ruff check, ruff format,
+  # mypy, then the verify command, then the verdict. The fixture is clean, so
+  # any failure is the workflow's, not the code's.
+  python-ci:
+    name: python-ci
+    uses: ./.github/workflows/python-ci.yml
+    permissions:
+      contents: read
+    with:
+      install: python -m pip --version
+      verify: python tests/python-ci/check.py
+      lint-strict: true
+      lint-paths: tests/python-ci
+      ruff-version: "0.16.10"
+      typecheck: true
+      typecheck-strict: true
+      typecheck-paths: tests/python-ci
