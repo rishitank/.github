@@ -8,7 +8,8 @@
     "helpers:pinGitHubActionDigests"
   ],
   "timezone": "Europe/London",
-  "schedule": ["* 0-6 * * 1"],
+  "schedule": ["* * 1-3 * *"],
+  "updateNotScheduled": false,
   "prConcurrentLimit": 5,
   "prHourlyLimit": 2,
   "labels": ["dependencies"],
@@ -16,7 +17,7 @@
   "platformAutomerge": false,
   "lockFileMaintenance": {
     "enabled": true,
-    "schedule": ["* 0-6 1 * *"]
+    "schedule": ["* * 1-3 */3 *"]
   },
   "vulnerabilityAlerts": {
     "enabled": true,
@@ -27,30 +28,47 @@
   },
   "packageRules": [
     {
-      "description": "Group all GitHub Actions bumps into one PR. helpers:pinGitHubActionDigests above converts tags to digests, so this is also what keeps those digests fresh.",
-      "matchManagers": ["github-actions"],
-      "groupName": "github actions",
-      "automerge": true,
-      "automergeType": "pr"
+      "description": "CI-MINUTE BUDGET (Oct 2026). Every Renovate PR runs full CI, and so does its merge, so one PR per package was about 450 PRs a month across the estate. All non-major updates now arrive together, in a window on the 1st-3rd of the month (wide enough that automerge PRs pass CI and merge inside it, because updateNotScheduled is false), in two PRs per repository split by merge policy: this one (reviewed) and 'non-major (automerge)'. Docker digest updates ride here too. Security fixes are not affected: vulnerabilityAlerts ignores schedule and grouping and opens at once.",
+      "matchUpdateTypes": ["minor", "patch", "digest"],
+      "groupName": "non-major (review)",
+      "groupSlug": "non-major-review"
     },
     {
       "description": "Dev tooling churns constantly and cannot break production. Let it through on green CI.",
       "matchDepTypes": ["devDependencies"],
       "matchUpdateTypes": ["minor", "patch", "pin", "digest"],
+      "groupName": "non-major (automerge)",
+      "groupSlug": "non-major-automerge",
       "automerge": true,
       "automergeType": "pr"
     },
     {
-      "description": "A major bump is a migration, not an update. Always human-reviewed.",
+      "description": "A major bump is a migration, not an update. Always human-reviewed, and no PR (so no CI run) until it is ticked on the Dependency Dashboard.",
       "matchUpdateTypes": ["major"],
       "automerge": false,
       "addLabels": ["major-upgrade"],
-      "minimumReleaseAge": "7 days"
+      "minimumReleaseAge": "7 days",
+      "dependencyDashboardApproval": true
     },
     {
       "description": "Let a release sit long enough that someone else finds the regression first.",
       "matchUpdateTypes": ["minor", "patch"],
       "minimumReleaseAge": "3 days"
+    },
+    {
+      "description": "Non-major GitHub Actions bumps ride in the automerge group. helpers:pinGitHubActionDigests above converts tags to digests, so this is also what keeps those digests fresh. Action majors are not matched here: the major rule above keeps them human-reviewed, behind dashboard approval.",
+      "matchManagers": ["github-actions"],
+      "matchUpdateTypes": ["minor", "patch", "digest", "pinDigest", "pin"],
+      "groupName": "non-major (automerge)",
+      "groupSlug": "non-major-automerge",
+      "automerge": true,
+      "automergeType": "pr"
+    },
+    {
+      "description": "This estate's own reusable workflows are referenced at the moving @v1 tag, so a change ships by moving the tag (move-major-tag.yml) with no pull request anywhere. Renovate pinning them to digests, or chasing main, turned every change into a PR in every consuming repository, each running full CI. Callers still pinned to a SHA must be moved to @v1 once by hand: Renovate no longer touches them.",
+      "matchManagers": ["github-actions"],
+      "matchPackageNames": ["/^(tanksterai|rishitank)\\/\\.github$/i"],
+      "enabled": false
     }
   ]
 }

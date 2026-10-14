@@ -10,6 +10,13 @@
       "addLabels": ["tooling-upgrade"]
     },
     {
+      "description": "Their non-major bumps ride in the reviewed group, not the automerge one (a group automerges only if every update in it does).",
+      "matchPackageNames": ["ruff", "mypy", "pip-audit"],
+      "matchUpdateTypes": ["minor", "patch"],
+      "groupName": "non-major (review)",
+      "groupSlug": "non-major-review"
+    },
+    {
       "description": "The scientific stack has tight ABI coupling. Bump these together or not at all.",
       "matchPackageNames": [
         "numpy",
