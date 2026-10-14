@@ -6,6 +6,7 @@ file as its verify command, so each lint, typecheck and verify step runs.
 
 
 def add(a: int, b: int) -> int:
+    """Return the sum of a and b."""
     return a + b
 
 
