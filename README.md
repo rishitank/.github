@@ -199,8 +199,10 @@ A change here lands on every consuming repo at once. Treat it accordingly:
 1. Open a PR. `workflows-lint.yml` runs actionlint over the change.
 2. Test against one consuming repo by pinning it to the branch
    (`@my-branch` instead of `@v1`) and watching a real run go green.
-3. Merge, then move the `v1` tag:
-   `git tag -f v1 && git push -f origin v1`.
+3. Merge, then move the `v1` tag: run the `move-major-tag` workflow (it
+   refuses any commit that is not on main), or by hand
+   `git push -f origin <sha>:refs/tags/v1`. Always the full `refs/tags/`
+   path: this repository also has a stale branch named `v1`.
 
 ## Visibility
 
