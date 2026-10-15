@@ -30,8 +30,15 @@ on:
         type: string
         default: ""
       runs-on:
+        description: >-
+          Runner label. Empty (the default) follows the calling repository's
+          CI_RUNNER variable, which moves CI onto a fallback runner when the
+          included Actions minutes run out, and means ubuntu-latest when that
+          variable is unset. A public repository ignores CI_RUNNER: its
+          minutes are free, and a fork's pull request must never reach a
+          self-hosted runner.
         type: string
-        default: ubuntu-latest
+        default: ""
       verify:
         description: Command proving the regenerated lockfile actually installs and builds.
         type: string
@@ -46,16 +53,21 @@ permissions:
 jobs:
   lockfile:
     name: Regenerate lockfile
-    runs-on: ${{ inputs.runs-on }}
+    runs-on: ${{ inputs.runs-on || (github.event.repository.private && vars.CI_RUNNER) || 'ubuntu-latest' }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
-      contents: write
+      contents: write # the Commit step pushes the regenerated lockfile
     steps:
-      - uses: actions/checkout@v7.0.1
+      # No persisted token: the install and verify steps run dependency
+      # lifecycle scripts and the caller's command, which must not find a
+      # write-scoped token in .git/config. Only the Commit step gets one.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install pnpm
         if: inputs.package-manager == 'pnpm'
-        uses: pnpm/action-setup@v6.0.10
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
         with:
           version: ${{ inputs.pnpm-version }}
 
@@ -77,7 +89,7 @@ jobs:
           VERSION_FILE: ${{ inputs.node-version-file }}
           VERSION: ${{ inputs.node-version }}
 
-      - uses: actions/setup-node@v7.0.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: ${{ steps.node.outputs.file }}
           node-version: ${{ steps.node.outputs.version }}
@@ -161,6 +173,14 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git commit -m "chore: regenerate ${LOCKFILE}"
-          git push
+          # The same header actions/checkout would have persisted, given to
+          # this one push through the environment instead of .git/config.
+          auth=$(printf 'x-access-token:%s' "${GH_TOKEN}" | base64 | tr -d '\n')
+          echo "::add-mask::${auth}"
+          GIT_CONFIG_COUNT=1 \
+            GIT_CONFIG_KEY_0="http.https://github.com/.extraheader" \
+            GIT_CONFIG_VALUE_0="AUTHORIZATION: basic ${auth}" \
+            git push
         env:
           LOCKFILE: ${{ steps.lock.outputs.path }}
+          GH_TOKEN: ${{ github.token }}

@@ -260,7 +260,13 @@ on:
         type: boolean
         default: true
       runs-on:
-        description: Empty follows the CI_RUNNER variable, then ubuntu-latest.
+        description: >-
+          Runner label. Empty (the default) follows the calling repository's
+          CI_RUNNER variable, which moves CI onto a fallback runner when the
+          included Actions minutes run out, and means ubuntu-latest when that
+          variable is unset. A public repository ignores CI_RUNNER: its
+          minutes are free, and a fork's pull request must never reach a
+          self-hosted runner.
         type: string
         default: ""
       timeout-minutes:
@@ -277,7 +283,7 @@ permissions:
 jobs:
   runtime:
     name: Runtime gate
-    runs-on: ${{ inputs.runs-on || vars.CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ${{ inputs.runs-on || (github.event.repository.private && vars.CI_RUNNER) || 'ubuntu-latest' }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
     # No write scope here: this job runs the app's install, build, migrate
     # and start, i.e. dependency code under test. The PR comment is posted by
@@ -712,7 +718,7 @@ jobs:
     name: Runtime gate comment
     needs: runtime
     if: ${{ !cancelled() && inputs.comment && github.event_name == 'pull_request' }}
-    runs-on: ${{ inputs.runs-on || vars.CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ${{ inputs.runs-on || (github.event.repository.private && vars.CI_RUNNER) || 'ubuntu-latest' }}
     timeout-minutes: 5
     permissions:
       # The sticky comment. The caller's grant is the ceiling.

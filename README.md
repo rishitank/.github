@@ -258,6 +258,30 @@ consuming repo:
 - **Reference this repository at `@v1`**, never by SHA: a SHA pin turns every
   change into a pull request in every consuming repository.
 
+## Runner selection
+
+Every job in the reusable workflows picks its runner with the same expression:
+
+```
+inputs.runs-on || (github.event.repository.private && vars.CI_RUNNER) || 'ubuntu-latest'
+```
+
+- **Leave `runs-on` unset in callers.** An explicit value, `ubuntu-latest`
+  included, always wins, so it also switches the fallback off.
+- **`CI_RUNNER` is the calling repository's variable.** In a called workflow
+  `vars` is the caller's. The fallback dispatcher sets it to the fallback
+  runner's label when the included Actions minutes run out, and back to
+  `ubuntu-latest` when they reset. It must be a single label, not a JSON
+  array: a value no runner matches leaves the job queued, not failed.
+- **Only private repositories follow it.** Public repositories' minutes are
+  free, and a self-hosted runner on a public repository runs any fork's pull
+  request. Scheduled runs carry `github.event.repository` too, so they are
+  covered. An event without it reads as not private and stays on
+  `ubuntu-latest`: the guard fails closed.
+
+A caller's own jobs (ones that do not call a workflow here) should use the
+same expression.
+
 ## Changing a workflow
 
 A change here lands on every consuming repo at once. Treat it accordingly:
