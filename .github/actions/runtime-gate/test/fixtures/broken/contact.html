@@ -1,0 +1,2 @@
+<!doctype html><html><head><title>Contact</title></head><body><a href="/">Home</a><h1>Contact</h1><label>Email <input type="email"></label>
+<form onsubmit="event.preventDefault(); fetch('/api/people/?search='+this.q.value).then(function(r){return r.json()}).catch(function(){return undefined}).then(function(data){var results=data.results; document.title=String(results.length)})"><input type="text" name="q" oninput="this.form.go.disabled=!this.value"><input type="submit" name="go" value="Search" disabled></form><script src="/static/missing-chunk.js"></script></body></html>

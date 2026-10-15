@@ -1,0 +1,100 @@
+# Moves a major-version tag (v1) to a commit on main, so every repository
+# pinned to @v1 picks up the change.
+#
+# The same thing by hand is `git push -f origin <sha>:refs/tags/v1` (always the
+# full refs/tags/ path: this repository also has a stale branch named v1). This
+# exists so it can be done without a local clone, and so the move is recorded
+# in the Actions log with the old and new commit side by side. It is a copy of
+# TanksterAI/.github's move-major-tag.yml, plus annotated-tag handling in the
+# summary, kept permanently this time (a temporary one was removed in 3978d59,
+# which left no way to move the tag without a clone).
+name: move-major-tag
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Major tag to move, e.g. v1.
+        type: string
+        default: v1
+      sha:
+        description: Commit to point it at. Empty means the head of main.
+        type: string
+        default: ""
+
+permissions: {}
+
+jobs:
+  move:
+    name: Move tag
+    # One move per tag at a time, so each run's "old -> new" summary is true.
+    concurrency:
+      group: move-major-tag-${{ inputs.tag }}
+      cancel-in-progress: false
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 5
+    permissions:
+      contents: write # writing refs/tags/* is a contents write
+    steps:
+      - name: Move
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ inputs.tag }}
+          WANT: ${{ inputs.sha }}
+        run: |
+          set -euo pipefail
+
+          if [[ ! "${TAG}" =~ ^v[0-9]+$ ]]; then
+            echo "::error::'${TAG}' is not a major-version tag like v1."
+            exit 1
+          fi
+
+          # Always resolve to a full commit SHA: the input may be a short SHA
+          # or a ref name, and the refs API documents only full SHAs.
+          SHA=$(gh api "repos/${REPO}/commits/${WANT:-main}" --jq .sha) || {
+            echo "::error::Could not resolve '${WANT:-main}' to a commit."
+            exit 1
+          }
+          if [[ ! "${SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Could not resolve '${WANT:-main}' to a commit."
+            exit 1
+          fi
+
+          # A major tag only ever points at something that is on main, so a
+          # consuming repo never runs a workflow that skipped review.
+          status=$(gh api "repos/${REPO}/compare/${SHA}...main" --jq .status)
+          case "${status}" in
+            identical|ahead) ;;
+            *)
+              echo "::error::${SHA} is not on main (compare status: ${status})."
+              exit 1
+              ;;
+          esac
+
+          # Create the tag only when it is genuinely missing (404); any other
+          # failure to read it (a 5xx, a rate limit) stops here instead of
+          # being mistaken for "missing".
+          if ref=$(gh api "repos/${REPO}/git/ref/tags/${TAG}" \
+              --jq '.object.type + " " + .object.sha' 2>/tmp/ref.err); then
+            read -r type old <<< "${ref}"
+            # An annotated tag's ref points at a tag object, not a commit:
+            # follow it, so the summary records the commit it is moving from.
+            while [ "${type}" = "tag" ]; do
+              ref=$(gh api "repos/${REPO}/git/tags/${old}" \
+                --jq '.object.type + " " + .object.sha')
+              read -r type old <<< "${ref}"
+            done
+            gh api -X PATCH "repos/${REPO}/git/refs/tags/${TAG}" \
+              -f sha="${SHA}" -F force=true --silent
+          elif grep -q "HTTP 404" /tmp/ref.err; then
+            old="(none)"
+            gh api -X POST "repos/${REPO}/git/refs" \
+              -f ref="refs/tags/${TAG}" -f sha="${SHA}" --silent
+          else
+            cat /tmp/ref.err >&2
+            echo "::error::Could not read refs/tags/${TAG}; not moving it."
+            exit 1
+          fi
+
+          echo "${TAG}: ${old} -> ${SHA}" | tee -a "${GITHUB_STEP_SUMMARY}"

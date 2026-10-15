@@ -1,0 +1,96 @@
+# Proves the runtime-gate toolkit still does its job whenever it changes:
+# the crawler passes a healthy site and catches every kind of breakage in a
+# broken one, the explorer harness runs end to end (fake model, no key), and
+# the reusable workflow itself boots and crawls a site through its real
+# static-serving path.
+name: runtime-gate-selftest
+
+on:
+  pull_request:
+    paths:
+      - .github/actions/runtime-gate/**
+      - .github/workflows/runtime-gate*.yml
+  push:
+    branches: [main]
+    paths:
+      - .github/actions/runtime-gate/**
+      - .github/workflows/runtime-gate*.yml
+  workflow_dispatch:
+
+concurrency:
+  group: runtime-gate-selftest-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  toolkit:
+    name: Toolkit self-test
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: .github/actions/runtime-gate
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # `current` on purpose: the account's policy is the latest Current
+      # Node, and action.yml installs `current` when a job has no Node >= 22,
+      # so this is the runtime consumers get.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: current
+      - run: npm ci --no-audit --no-fund
+      - run: npx --no-install playwright install --with-deps --no-shell chromium
+      - run: npm test
+
+  workflow:
+    name: Reusable workflow end to end
+    uses: ./.github/workflows/runtime-gate.yml
+    # The called workflow's jobs declare these scopes, and a caller must grant
+    # at least what a called job declares or the run is rejected at startup,
+    # even for a job that is then skipped. pull-requests: write is for its
+    # `comment` job, which `comment: false` skips here.
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: write
+    with:
+      mode: static
+      setup: none
+      build: ""
+      static-dir: .github/actions/runtime-gate/test/fixtures/good
+      spa: false
+      port: 4173
+      explore: always
+      comment: false
+
+  # A dynamic app with sign-up and sign-in: proves the login inputs reach the
+  # crawler and the explorer through the real workflow, that the signed-in
+  # crawl passes on a healthy app, and that the explorer (fake model, so no
+  # key is needed) runs signed in, screens the injection page and records flows.
+  workflow-signed-in:
+    name: Reusable workflow end to end (signed in)
+    uses: ./.github/workflows/runtime-gate.yml
+    # Same grant as above, for the same reason.
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: write
+    with:
+      mode: command
+      build: ""
+      start: node .github/actions/runtime-gate/test/fixtures/app-server.mjs 4174
+      port: 4174
+      login-path: /login
+      signup-path: /signup
+      login-username: selftest@example.com
+      login-password: ci-only-password-123
+      login-check: /dashboard
+      explore: always
+      explore-model: fake
+      comment: false
