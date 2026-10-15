@@ -29,7 +29,7 @@
 #
 # Token (GH_TOKEN, used by gh): read the repository, its branches and pull
 # requests, and delete refs (Contents: Read and write, Pull requests:
-# Read-only). The workflow passes PRUNE_TOKEN.
+# Read-only). The workflow passes ACCOUNT_ADMIN_TOKEN.
 set -euo pipefail
 
 KEEP_RE='^(main|master|develop|staging|test|gh-pages|v[0-9][0-9.]*|deploy-.*|release/.*)$'

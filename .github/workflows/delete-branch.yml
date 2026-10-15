@@ -19,7 +19,8 @@
 # restores the branch at the same commit.
 #
 # TOKEN: the same fine-grained PAT as branch-prune, the repository secret
-# PRUNE_TOKEN (Contents: Read and write, Pull requests: Read-only). GITHUB_TOKEN
+# ACCOUNT_ADMIN_TOKEN (this workflow needs Contents: Read and write and
+# Pull requests: Read). GITHUB_TOKEN
 # only reaches this repository. Every input reaches the shell through env. The
 # job only runs from main, so a dispatch on another branch can never run an
 # unreviewed copy of the script with this token.
@@ -60,7 +61,7 @@ jobs:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    # Checkout only. Every API call uses PRUNE_TOKEN, never GITHUB_TOKEN.
+    # Checkout only. Every API call uses ACCOUNT_ADMIN_TOKEN, never GITHUB_TOKEN.
     permissions:
       contents: read
     steps:
@@ -70,7 +71,7 @@ jobs:
 
       - name: Delete the branch
         env:
-          GH_TOKEN: ${{ secrets.PRUNE_TOKEN }}
+          GH_TOKEN: ${{ secrets.ACCOUNT_ADMIN_TOKEN }}
           OWNER: ${{ github.repository_owner }}
           REPOSITORY: ${{ inputs.repository }}
           BRANCH: ${{ inputs.branch }}
@@ -79,7 +80,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ -z "${GH_TOKEN}" ]; then
-            echo "::error title=delete-branch::PRUNE_TOKEN is not set. See branch-prune.yml for how to create it."
+            echo "::error title=delete-branch::ACCOUNT_ADMIN_TOKEN is not set. See branch-prune.yml for how to create it."
             exit 1
           fi
           bash scripts/delete-branch.sh --owner "${OWNER}" --repo "${REPOSITORY}" \
