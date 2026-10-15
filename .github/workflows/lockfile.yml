@@ -69,7 +69,6 @@ jobs:
       contents: read
     outputs:
       changed: ${{ steps.changed.outputs.changed }}
-      lockfile: ${{ steps.lock.outputs.path }}
       sum: ${{ steps.changed.outputs.sum }}
     steps:
       # No persisted token: the proof steps run dependencies' install scripts,
@@ -236,7 +235,9 @@ jobs:
             exit 1
           fi
         env:
-          LOCKFILE: ${{ needs.lockfile.outputs.lockfile }}
+          # From the caller's input, not from a job output: the lockfile job runs
+          # dependency code and must not be able to choose which file is committed.
+          LOCKFILE: ${{ inputs.package-manager == 'pnpm' && 'pnpm-lock.yaml' || 'package-lock.json' }}
           EXPECTED: ${{ needs.lockfile.outputs.sum }}
 
       # The token reaches this step only, and only as an environment-supplied
@@ -262,5 +263,5 @@ jobs:
             GIT_CONFIG_VALUE_0="AUTHORIZATION: basic ${auth}" \
             git push origin "HEAD:refs/heads/${GITHUB_REF_NAME}"
         env:
-          LOCKFILE: ${{ needs.lockfile.outputs.lockfile }}
+          LOCKFILE: ${{ inputs.package-manager == 'pnpm' && 'pnpm-lock.yaml' || 'package-lock.json' }}
           GH_TOKEN: ${{ github.token }}
