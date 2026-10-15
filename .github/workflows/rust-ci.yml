@@ -38,7 +38,7 @@ on:
         type: boolean
         default: true
       forbid-panics:
-        description: Fail if unwrap/expect/panic!/todo!/unimplemented! appear outside #[cfg(test)].
+        description: "Fail if unwrap/expect/panic!/todo!/unimplemented! appear outside #[cfg(test)]."
         type: boolean
         default: true
       forbid-panics-path:
