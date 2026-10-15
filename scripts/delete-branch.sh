@@ -10,11 +10,15 @@
 # Nothing is deleted, and the run fails, unless every check holds:
 #   1. the repository belongs to --owner;
 #   2. --sha is a full 40-character commit SHA and the branch's tip is exactly
-#      that commit, so work pushed after you looked is never deleted;
+#      that commit. This narrows, but cannot close, the window in which a push
+#      lands between the check and the DELETE: the REST delete has no
+#      precondition on the old SHA;
 #   3. the branch is not the repository's default branch and does not match
 #      KEEP_RE, the long-lived pattern prune-merged-branches.sh also keeps;
 #   4. GitHub does not report the branch as protected;
-#   5. no open pull request uses it as its head or as its base.
+#   5. no open pull request uses it as its head or as its base, in this
+#      repository or, for a fork, in its parent and source repositories (where
+#      a fork branch's pull requests live).
 # A branch that is already gone is reported and is not an error. The default
 # mode is dry-run: it makes every check and reports what it would delete.
 #
@@ -31,15 +35,24 @@ fail() {
   exit 1
 }
 
+usage_error() {
+  echo "::error title=delete-branch::$1"
+  exit 2
+}
+
+# Inputs are echoed into logs and the job summary before they are validated: a
+# newline would let a value start its own workflow command line.
+clean() { local v="${1//[$'\n\r']/ }"; printf '%s' "${v//\`/\'}"; }
+
 summary() {
   if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
     {
       echo "### delete-branch: $1"
       echo
-      echo "- Repository: \`${repo:-?}\`"
-      echo "- Branch: \`${branch:-?}\`"
-      echo "- Expected tip: \`${sha:-?}\`"
-      echo "- Mode: \`${mode:-?}\`"
+      echo "- Repository: \`$(clean "${repo:-?}")\`"
+      echo "- Branch: \`$(clean "${branch:-?}")\`"
+      echo "- Expected tip: \`$(clean "${sha:-?}")\`"
+      echo "- Mode: \`$(clean "${mode:-?}")\`"
       echo
       echo "$2"
     } >> "${GITHUB_STEP_SUMMARY}"
@@ -51,35 +64,48 @@ urlencode() { jq -rn --arg v "$1" '$v | @uri'; }
 owner="" repo="" branch="" sha="" mode="dry-run"
 while [ $# -gt 0 ]; do
   case "$1" in
-    --owner) owner="${2-}"; shift 2 ;;
-    --repo) repo="${2-}"; shift 2 ;;
-    --branch) branch="${2-}"; shift 2 ;;
-    --sha) sha="${2-}"; shift 2 ;;
-    --mode) mode="${2-}"; shift 2 ;;
+    --owner|--repo|--branch|--sha|--mode)
+      [ $# -ge 2 ] || usage_error "$1 needs a value"
+      case "$1" in
+        --owner) owner="$2" ;;
+        --repo) repo="$2" ;;
+        --branch) branch="$2" ;;
+        --sha) sha="$2" ;;
+        --mode) mode="$2" ;;
+      esac
+      shift 2 ;;
     -h|--help) sed -n '2,/^set -euo/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; exit 0 ;;
-    *) echo "::error title=delete-branch::unknown argument: $1"; exit 2 ;;
+    *) usage_error "unknown argument: $(clean "$1")" ;;
   esac
 done
 
 case "${mode}" in
   dry-run|apply) ;;
-  *) fail "mode must be dry-run or apply, not '${mode}'" ;;
+  *) fail "mode must be dry-run or apply, not '$(clean "${mode}")'" ;;
 esac
 [[ "${owner}" =~ ^[A-Za-z0-9-]+$ ]] || fail "--owner is missing or not a GitHub account name"
-[[ "${repo}" =~ ^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$ ]] || fail "repository must be owner/name, got '${repo}'"
-[ "${repo%%/*}" = "${owner}" ] || fail "repository ${repo} does not belong to ${owner}"
+[[ "${repo}" =~ ^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$ ]] || fail "repository must be owner/name, got '$(clean "${repo}")'"
+# GitHub account names are case-insensitive.
+repo_owner="${repo%%/*}"
+[ "${repo_owner,,}" = "${owner,,}" ] || fail "repository ${repo} does not belong to ${owner}"
 [[ "${sha}" =~ ^[0-9a-f]{40}$ ]] || fail "sha must be a full 40-character lowercase commit SHA"
 if [[ ! "${branch}" =~ ^[A-Za-z0-9._/@+-]+$ ]] || [[ "${branch}" == -* ]] || [[ "${branch}" == /* ]] \
   || [[ "${branch}" == */ ]] || [[ "${branch}" == *..* ]] || [[ "${branch}" == *//* ]] \
   || [[ "${branch}" == *.lock ]] || [[ "${branch}" == *@\{* ]]; then
-  fail "'${branch}' is not a branch name this workflow accepts"
+  fail "'$(clean "${branch}")' is not a branch name this workflow accepts"
 fi
 if [[ "${branch}" =~ ${KEEP_RE} ]]; then
   fail "${branch} matches the long-lived pattern and is never deleted here"
 fi
 
-default_branch="$(gh api "repos/${repo}" --jq .default_branch)" || fail "cannot read repos/${repo}"
+meta="$(gh api "repos/${repo}")" || fail "cannot read repos/${repo}"
+# gh follows redirects: a renamed or transferred repository must not pass as this one.
+full_name="$(jq -r '.full_name // empty' <<<"${meta}")"
+[ "${full_name,,}" = "${repo,,}" ] || fail "repos/${repo} resolved to '${full_name}' (renamed or transferred?)"
+default_branch="$(jq -r '.default_branch // empty' <<<"${meta}")"
 [ -n "${default_branch}" ] || fail "repos/${repo} returned no default branch"
+# A fork branch's pull requests live in the fork's parent (and source) repository.
+upstreams="$(jq -r '[.parent.full_name, .source.full_name] | map(select(. != null)) | unique | .[]' <<<"${meta}")"
 [ "${branch}" != "${default_branch}" ] || fail "${branch} is the default branch of ${repo}"
 
 enc="$(urlencode "${branch}")"
@@ -91,6 +117,9 @@ if ! info="$(gh api "repos/${repo}/branches/${enc}" 2>&1)"; then
   fi
   fail "cannot read ${repo} branch ${branch}: ${info}"
 fi
+# gh follows the redirect for a renamed branch: the name must match exactly.
+name="$(jq -r '.name // empty' <<<"${info}")"
+[ "${name}" = "${branch}" ] || fail "branch ${branch} in ${repo} resolved to '${name}' (renamed?)"
 tip="$(jq -r '.commit.sha // empty' <<<"${info}")"
 # Not `.protected // empty`: jq's // treats false as missing.
 protected="$(jq -r 'if .protected == null then "" else (.protected | tostring) end' <<<"${info}")"
@@ -104,6 +133,11 @@ open_head="$(gh api "repos/${repo}/pulls?state=open&per_page=1&head=$(urlencode 
 open_base="$(gh api "repos/${repo}/pulls?state=open&per_page=1&base=${enc}" --jq 'length')" \
   || fail "cannot list open pull requests into ${branch}"
 [ "${open_base}" = "0" ] || fail "an open pull request in ${repo} targets ${branch}"
+for up in ${upstreams}; do
+  open_up="$(gh api "repos/${up}/pulls?state=open&per_page=1&head=$(urlencode "${owner}:${branch}")" --jq 'length')" \
+    || fail "cannot list open pull requests in ${up}"
+  [ "${open_up}" = "0" ] || fail "an open pull request in ${up} uses ${owner}:${branch} as its head"
+done
 
 if [ "${mode}" = "dry-run" ]; then
   echo "dry-run: would delete ${repo} ${branch} at ${tip}."
@@ -113,8 +147,16 @@ fi
 
 gh api -X DELETE "repos/${repo}/git/refs/heads/${enc}" >/dev/null \
   || fail "DELETE refs/heads/${branch} in ${repo} failed"
-if gh api "repos/${repo}/branches/${enc}" >/dev/null 2>&1; then
-  fail "${branch} still exists in ${repo} after the DELETE"
-fi
+# Only a 404 proves it is gone; any other failure is unknown, not success. A
+# short retry covers a read that briefly still sees the branch.
+for attempt in 1 2 3; do
+  if gone="$(gh api "repos/${repo}/branches/${enc}" 2>&1)"; then
+    [ "${attempt}" -lt 3 ] || fail "${branch} still exists in ${repo} after the DELETE"
+    sleep "${READBACK_SLEEP:-2}"
+    continue
+  fi
+  grep -q 'HTTP 404' <<<"${gone}" && break
+  fail "DELETE sent, but the read-back of ${branch} in ${repo} failed: ${gone}"
+done
 echo "Deleted ${repo} ${branch} (was ${tip})."
 summary "Deleted" "Deleted. To restore it: \`gh api repos/${repo}/git/refs -f ref=refs/heads/${branch} -f sha=${tip}\`."
