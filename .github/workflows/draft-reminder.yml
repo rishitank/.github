@@ -33,8 +33,9 @@
 # means no comment: when in doubt, it stays quiet.
 #
 # TOKEN. The default GITHUB_TOKEN is scoped to this repository and cannot
-# comment anywhere else, so this uses the `PERSONAL_ADMIN_TOKEN` secret. It
-# needs the repository permission "Pull requests: read and write" on every
+# comment anywhere else, so this uses the `ACCOUNT_ADMIN_TOKEN` secret, the
+# account-wide token the cross-repository workflows here share. This workflow
+# only needs the repository permission "Pull requests: read and write" on every
 # repository on the account (a fine-grained PAT with "All repositories";
 # Metadata: read comes with it). A private repository the token cannot see
 # is not searched at all, so grant it on all repositories, not a selection.
@@ -87,8 +88,8 @@ jobs:
     steps:
       - name: Remind
         env:
-          GH_TOKEN: ${{ secrets.PERSONAL_ADMIN_TOKEN }}
-          TOKEN_NAME: PERSONAL_ADMIN_TOKEN
+          GH_TOKEN: ${{ secrets.ACCOUNT_ADMIN_TOKEN }}
+          TOKEN_NAME: ACCOUNT_ADMIN_TOKEN
           OWNER: ${{ github.repository_owner }}
           DRY_RUN: ${{ github.event_name == 'schedule' && 'false' || inputs.dry-run }}
           # Twenty minutes, inside the 30-minute job timeout. See TIME BUDGET.
