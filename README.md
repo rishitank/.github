@@ -197,7 +197,7 @@ consuming repo:
 Every job in the reusable workflows picks its runner with the same expression:
 
 ```
-inputs.runs-on || (github.event.repository.visibility != 'public' && vars.CI_RUNNER) || 'ubuntu-latest'
+inputs.runs-on || (github.event.repository.private && vars.CI_RUNNER) || 'ubuntu-latest'
 ```
 
 - **Leave `runs-on` unset in callers.** An explicit value, `ubuntu-latest`
@@ -207,11 +207,11 @@ inputs.runs-on || (github.event.repository.visibility != 'public' && vars.CI_RUN
   runner's label when the included Actions minutes run out, and back to
   `ubuntu-latest` when they reset. It must be a single label, not a JSON
   array: a value no runner matches leaves the job queued, not failed.
-- **Public repositories ignore it.** Their minutes are free, and a
-  self-hosted runner on a public repository runs any fork's pull request.
-  Scheduled runs carry `github.event.repository` too, so they are covered.
-  An event without it would leave the visibility empty, and the job would
-  follow `CI_RUNNER`.
+- **Only private repositories follow it.** Public repositories' minutes are
+  free, and a self-hosted runner on a public repository runs any fork's pull
+  request. Scheduled runs carry `github.event.repository` too, so they are
+  covered. An event without it reads as not private and stays on
+  `ubuntu-latest`: the guard fails closed.
 
 A caller's own jobs (ones that do not call a workflow here) should use the
 same expression.

@@ -283,7 +283,7 @@ permissions:
 jobs:
   runtime:
     name: Runtime gate
-    runs-on: ${{ inputs.runs-on || (github.event.repository.visibility != 'public' && vars.CI_RUNNER) || 'ubuntu-latest' }}
+    runs-on: ${{ inputs.runs-on || (github.event.repository.private && vars.CI_RUNNER) || 'ubuntu-latest' }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
     # No write scope here: this job runs the app's install, build, migrate
     # and start, i.e. dependency code under test. The PR comment is posted by
@@ -718,7 +718,7 @@ jobs:
     name: Runtime gate comment
     needs: runtime
     if: ${{ !cancelled() && inputs.comment && github.event_name == 'pull_request' }}
-    runs-on: ${{ inputs.runs-on || (github.event.repository.visibility != 'public' && vars.CI_RUNNER) || 'ubuntu-latest' }}
+    runs-on: ${{ inputs.runs-on || (github.event.repository.private && vars.CI_RUNNER) || 'ubuntu-latest' }}
     timeout-minutes: 5
     permissions:
       # The sticky comment. The caller's grant is the ceiling.
