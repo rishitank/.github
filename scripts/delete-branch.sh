@@ -16,9 +16,13 @@
 #   3. the branch is not the repository's default branch and does not match
 #      KEEP_RE, the long-lived pattern prune-merged-branches.sh also keeps;
 #   4. GitHub does not report the branch as protected;
-#   5. no open pull request uses it as its head or as its base, in this
-#      repository or, for a fork, in its parent and source repositories (where
-#      a fork branch's pull requests live).
+#   5. no open pull request uses it as its head or as its base. The head check
+#      asks GraphQL for the open pull requests whose head is this ref, in any
+#      repository of the fork network (the parent, the source or a sibling
+#      fork), then also lists them over REST in this repository and in its
+#      parent and source. Pull requests into a branch can only live in the
+#      branch's own repository, so the base check asks only there. Any query
+#      that fails refuses the deletion.
 # A branch that is already gone is reported and is not an error. The default
 # mode is dry-run: it makes every check and reports what it would delete.
 #
@@ -29,21 +33,25 @@ set -euo pipefail
 
 KEEP_RE='^(main|master|develop|staging|test|gh-pages|v[0-9][0-9.]*|deploy-.*|release/.*)$'
 
+# fail MESSAGE: report a refused check in the log and the job summary, exit 1.
 fail() {
   echo "::error title=delete-branch::$1"
   summary "Refused" "$1"
   exit 1
 }
 
+# usage_error MESSAGE: report a malformed command line and exit 2, like the prune.
 usage_error() {
   echo "::error title=delete-branch::$1"
   exit 2
 }
 
-# Inputs are echoed into logs and the job summary before they are validated: a
-# newline would let a value start its own workflow command line.
+# clean VALUE: print VALUE without CR, LF or backticks. Inputs are echoed into
+# logs and the job summary before they are validated: a newline would let a
+# value start its own workflow command line.
 clean() { local v="${1//[$'\n\r']/ }"; printf '%s' "${v//\`/\'}"; }
 
+# summary TITLE TEXT: append the inputs and TEXT to the job summary, if any.
 summary() {
   if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
     {
@@ -59,6 +67,7 @@ summary() {
   fi
 }
 
+# urlencode VALUE: percent-encode VALUE for one URL path or query component.
 urlencode() { jq -rn --arg v "$1" '$v | @uri'; }
 
 owner="" repo="" branch="" sha="" mode="dry-run"
@@ -104,7 +113,7 @@ full_name="$(jq -r '.full_name // empty' <<<"${meta}")"
 [ "${full_name,,}" = "${repo,,}" ] || fail "repos/${repo} resolved to '${full_name}' (renamed or transferred?)"
 default_branch="$(jq -r '.default_branch // empty' <<<"${meta}")"
 [ -n "${default_branch}" ] || fail "repos/${repo} returned no default branch"
-# A fork branch's pull requests live in the fork's parent (and source) repository.
+# A fork branch's pull requests usually live in its parent (or source) repository.
 upstreams="$(jq -r '[.parent.full_name, .source.full_name] | map(select(. != null)) | unique | .[]' <<<"${meta}")"
 [ "${branch}" != "${default_branch}" ] || fail "${branch} is the default branch of ${repo}"
 
@@ -127,6 +136,19 @@ protected="$(jq -r 'if .protected == null then "" else (.protected | tostring) e
 [ "${tip}" = "${sha}" ] || fail "${branch} in ${repo} points at ${tip}, not ${sha}: it has moved since you looked"
 [ "${protected}" = "false" ] || fail "${branch} in ${repo} is protected (protected=${protected:-unknown})"
 
+# Every open pull request whose head is this ref, whichever repository of the
+# fork network it was opened in. A sibling fork's /pulls is not listable here.
+# shellcheck disable=SC2016 # $owner, $name and $ref are GraphQL variables.
+gql='query($owner: String!, $name: String!, $ref: String!) {
+  repository(owner: $owner, name: $name) {
+    ref(qualifiedName: $ref) { associatedPullRequests(states: OPEN, first: 1) { totalCount } }
+  }
+}'
+open_any="$(gh api graphql -f query="${gql}" -f owner="${repo%%/*}" -f name="${repo#*/}" \
+  -f ref="refs/heads/${branch}" --jq '.data.repository.ref.associatedPullRequests.totalCount')" \
+  || fail "cannot ask GraphQL for open pull requests from ${branch}"
+[[ "${open_any}" =~ ^[0-9]+$ ]] || fail "GraphQL returned no pull request count for ${branch} (got '$(clean "${open_any}")')"
+[ "${open_any}" = "0" ] || fail "${open_any} open pull request(s) in the fork network use ${repo}:${branch} as their head (GraphQL)"
 open_head="$(gh api "repos/${repo}/pulls?state=open&per_page=1&head=$(urlencode "${owner}:${branch}")" --jq 'length')" \
   || fail "cannot list open pull requests from ${branch}"
 [ "${open_head}" = "0" ] || fail "an open pull request in ${repo} uses ${branch} as its head"
