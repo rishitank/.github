@@ -56,9 +56,14 @@ jobs:
     runs-on: ${{ inputs.runs-on || (github.event.repository.visibility != 'public' && vars.CI_RUNNER) || 'ubuntu-latest' }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
-      contents: write
+      contents: write # the Commit step pushes the regenerated lockfile
     steps:
+      # No persisted token: the install and verify steps run dependency
+      # lifecycle scripts and the caller's command, which must not find a
+      # write-scoped token in .git/config. Only the Commit step gets one.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install pnpm
         if: inputs.package-manager == 'pnpm'
@@ -168,6 +173,14 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git commit -m "chore: regenerate ${LOCKFILE}"
-          git push
+          # The same header actions/checkout would have persisted, given to
+          # this one push through the environment instead of .git/config.
+          auth=$(printf 'x-access-token:%s' "${GH_TOKEN}" | base64 -w0)
+          echo "::add-mask::${auth}"
+          GIT_CONFIG_COUNT=1 \
+            GIT_CONFIG_KEY_0="http.https://github.com/.extraheader" \
+            GIT_CONFIG_VALUE_0="AUTHORIZATION: basic ${auth}" \
+            git push
         env:
           LOCKFILE: ${{ steps.lock.outputs.path }}
+          GH_TOKEN: ${{ github.token }}
