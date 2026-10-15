@@ -208,10 +208,10 @@ inputs.runs-on || (github.event.repository.visibility != 'public' && vars.CI_RUN
   `ubuntu-latest` when they reset. It must be a single label, not a JSON
   array: a value no runner matches leaves the job queued, not failed.
 - **Public repositories ignore it.** Their minutes are free, and a
-  self-hosted runner on a public repository runs any fork's pull request. A
-  `schedule` run has no event payload to read the visibility from, so it
-  follows `CI_RUNNER` wherever the variable is set; it only ever runs the
-  default branch.
+  self-hosted runner on a public repository runs any fork's pull request.
+  Scheduled runs carry `github.event.repository` too, so they are covered.
+  An event without it would leave the visibility empty, and the job would
+  follow `CI_RUNNER`.
 
 A caller's own jobs (ones that do not call a workflow here) should use the
 same expression.
