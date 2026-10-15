@@ -8,6 +8,12 @@
 # token) or is too old to expose the module under test, the job degrades to a
 # unit-only run with a written explanation instead of going red for a reason
 # that has nothing to do with the change under review.
+#
+# ONE JOB, ON PURPOSE. Lint and typecheck were separate jobs until Oct 2026.
+# GitHub bills every job rounded up to a whole minute, so a lint job doing
+# ~10 s of work cost a whole minute on every run. They are now steps of
+# `verify`: they run first and never stop the later steps, and the last step
+# fails the job if a strict one failed, so every check still reports.
 name: python-ci
 
 on:
@@ -18,9 +24,15 @@ on:
         type: string
         default: "3.12"
       runs-on:
-        description: Runner label.
+        description: >-
+          Runner label. Empty (the default) follows the calling repository's
+          CI_RUNNER variable, which moves CI onto a fallback runner when the
+          included Actions minutes run out, and means ubuntu-latest when that
+          variable is unset. A public repository ignores CI_RUNNER: its
+          minutes are free, and a fork's pull request must never reach a
+          self-hosted runner.
         type: string
-        default: ubuntu-latest
+        default: ""
       install:
         description: Command that installs the package under test.
         type: string
@@ -45,7 +57,9 @@ on:
         type: boolean
         default: false
       lint-paths:
-        description: Paths ruff should look at.
+        description: >-
+          Paths ruff should look at. Whitespace-separated (newlines too); no
+          globs, quotes or variables -- ruff expands directories itself.
         type: string
         default: "."
       ruff-version:
@@ -53,7 +67,9 @@ on:
         type: string
         default: ""
       typecheck:
-        description: Run mypy.
+        description: >-
+          Run mypy, as a step of the verify job: after Install and Extra
+          install (and the sibling, if any, which it does not check).
         type: boolean
         default: false
       typecheck-strict:
@@ -61,7 +77,9 @@ on:
         type: boolean
         default: false
       typecheck-paths:
-        description: Paths mypy should look at.
+        description: >-
+          Paths mypy should look at. Whitespace-separated (newlines too); no
+          globs, quotes or variables.
         type: string
         default: "."
       sibling-repo:
@@ -93,86 +111,66 @@ permissions:
   contents: read
 
 jobs:
-  lint:
-    name: Lint
-    if: inputs.lint
-    runs-on: ${{ inputs.runs-on }}
+  verify:
+    name: Verify
+    runs-on: ${{ inputs.runs-on || (github.event.repository.private && vars.CI_RUNNER) || 'ubuntu-latest' }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       contents: read
+    # The steps use bash (pipefail, arrays, here-strings): say so, rather
+    # than rely on the runner's default shell.
+    defaults:
+      run:
+        shell: bash
     steps:
-      - uses: actions/checkout@v7.0.1
+      # No persisted token: Install runs the package's (and its
+      # dependencies') build code, which must not find it in .git/config.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-python@v7.0.0
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ inputs.python-version }}
 
       - name: Install ruff
+        id: ruff_install
+        if: inputs.lint
+        # A failed install must not skip Verify; the verdict step fails on it.
+        continue-on-error: true
         run: |
           set -euo pipefail
           if [ -n "${RUFF_VERSION}" ]; then
-            pip install "ruff==${RUFF_VERSION}"
+            python -m pip install "ruff==${RUFF_VERSION}"
           else
             echo "::warning title=Unpinned linter::ruff is unpinned; a new ruff release can turn this build red without a code change. Set the ruff-version input."
-            pip install ruff
+            python -m pip install ruff
           fi
         env:
           RUFF_VERSION: ${{ inputs.ruff-version }}
 
       - name: ruff check
-        continue-on-error: ${{ !inputs.lint-strict }}
-        run: ruff check --output-format=github ${{ inputs.lint-paths }}
+        id: ruff_check
+        if: inputs.lint && steps.ruff_install.outcome == 'success'
+        continue-on-error: true
+        # Paths arrive through env and are split on whitespace, newlines
+        # included (read -d '' -a, which does not glob), never expanded into
+        # the script by ${{ }}.
+        run: |
+          read -r -d '' -a paths <<< "${LINT_PATHS}" || true
+          ruff check --output-format=github "${paths[@]}"
+        env:
+          LINT_PATHS: ${{ inputs.lint-paths }}
 
       - name: ruff format --check
-        continue-on-error: ${{ !inputs.lint-strict }}
-        run: ruff format --check --diff ${{ inputs.lint-paths }}
-
-      - name: Note advisory mode
-        if: ${{ !inputs.lint-strict }}
+        id: ruff_format
+        if: inputs.lint && steps.ruff_install.outcome == 'success'
+        continue-on-error: true
         run: |
-          {
-            echo "### Lint is advisory"
-            echo
-            echo "\`lint-strict\` is false, so ruff findings above did not fail the build."
-            echo "Clear the backlog, then set \`lint-strict: true\` in this repo's caller workflow."
-          } >> "$GITHUB_STEP_SUMMARY"
-
-  typecheck:
-    name: Typecheck
-    if: inputs.typecheck
-    runs-on: ${{ inputs.runs-on }}
-    timeout-minutes: ${{ inputs.timeout-minutes }}
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@v7.0.1
-
-      - uses: actions/setup-python@v7.0.0
-        with:
-          python-version: ${{ inputs.python-version }}
-
-      - name: Install
-        run: |
-          set -euo pipefail
-          ${{ inputs.install }}
-          pip install mypy
-
-      - name: mypy
-        continue-on-error: ${{ !inputs.typecheck-strict }}
-        run: mypy ${{ inputs.typecheck-paths }}
-
-  verify:
-    name: Verify
-    runs-on: ${{ inputs.runs-on }}
-    timeout-minutes: ${{ inputs.timeout-minutes }}
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@v7.0.1
-
-      - uses: actions/setup-python@v7.0.0
-        with:
-          python-version: ${{ inputs.python-version }}
+          read -r -d '' -a paths <<< "${LINT_PATHS}" || true
+          ruff format --check --diff "${paths[@]}"
+        env:
+          LINT_PATHS: ${{ inputs.lint-paths }}
 
       # continue-on-error is deliberate: a missing token is an infrastructure
       # problem, not a reason to fail the contributor's PR.
@@ -180,11 +178,12 @@ jobs:
         id: sibling
         if: inputs.sibling-repo != ''
         continue-on-error: true
-        uses: actions/checkout@v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ inputs.sibling-repo }}
           token: ${{ secrets.ci-token }}
           path: _sibling
+          persist-credentials: false
 
       - name: Install sibling
         id: sibling_install
@@ -195,7 +194,7 @@ jobs:
             echo "state=missing-token" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          ${{ inputs.sibling-install }}
+          eval "${PYCI_SIBLING_INSTALL}"
           if [ -z "${PROBE}" ]; then
             echo "state=ok" >> "$GITHUB_OUTPUT"
           elif python -c "import ${PROBE}" 2>/dev/null; then
@@ -204,37 +203,100 @@ jobs:
             echo "state=too-old" >> "$GITHUB_OUTPUT"
           fi
         env:
+          PYCI_SIBLING_INSTALL: ${{ inputs.sibling-install }}
           PROBE: ${{ inputs.sibling-probe-module }}
 
+      # The commands are the caller's, by design, so they are run with eval;
+      # they arrive through env, never expanded into the script by ${{ }}.
       - name: Install
         run: |
           set -euo pipefail
-          ${{ inputs.install }}
+          eval "${PYCI_INSTALL}"
+        env:
+          PYCI_INSTALL: ${{ inputs.install }}
 
       - name: Extra install
         if: inputs.extra-install != ''
         run: |
           set -euo pipefail
-          ${{ inputs.extra-install }}
+          eval "${PYCI_EXTRA_INSTALL}"
+        env:
+          PYCI_EXTRA_INSTALL: ${{ inputs.extra-install }}
+
+      - name: mypy
+        id: mypy
+        if: inputs.typecheck
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          python -m pip install mypy
+          read -r -d '' -a paths <<< "${TYPECHECK_PATHS}" || true
+          # _sibling is a checkout of another repo, not this one's code.
+          mypy --exclude '^_sibling/' "${paths[@]}"
+        env:
+          TYPECHECK_PATHS: ${{ inputs.typecheck-paths }}
 
       - name: Verify
         run: |
           set -euo pipefail
-          ${{ inputs.verify }}
+          eval "${PYCI_VERIFY}"
+        env:
+          PYCI_VERIFY: ${{ inputs.verify }}
 
       - name: Report integration coverage
         if: always() && inputs.sibling-repo != ''
         run: |
-          case "${{ steps.sibling_install.outputs.state }}" in
+          case "${STATE}" in
             ok)
-              echo "Full suite: \`${{ inputs.sibling-repo }}\` present, integration checks ran." >> "$GITHUB_STEP_SUMMARY"
+              echo "Full suite: \`${SIBLING}\` present, integration checks ran." >> "$GITHUB_STEP_SUMMARY"
               ;;
             too-old)
-              echo "::warning title=Integration checks skipped::${{ inputs.sibling-repo }} is installed but does not expose ${{ inputs.sibling-probe-module }}. Unit checks only."
-              echo "Partial suite: \`${{ inputs.sibling-repo }}\` is too old (no \`${{ inputs.sibling-probe-module }}\`). Unit checks only." >> "$GITHUB_STEP_SUMMARY"
+              echo "::warning title=Integration checks skipped::${SIBLING} is installed but does not expose ${PROBE}. Unit checks only."
+              echo "Partial suite: \`${SIBLING}\` is too old (no \`${PROBE}\`). Unit checks only." >> "$GITHUB_STEP_SUMMARY"
               ;;
             *)
-              echo "::warning title=Integration checks skipped::${{ inputs.sibling-repo }} could not be checked out. Check the ci-token secret."
-              echo "Partial suite: \`${{ inputs.sibling-repo }}\` could not be checked out. Check the \`ci-token\` secret. Unit checks only." >> "$GITHUB_STEP_SUMMARY"
+              echo "::warning title=Integration checks skipped::${SIBLING} could not be checked out. Check the ci-token secret."
+              echo "Partial suite: \`${SIBLING}\` could not be checked out. Check the \`ci-token\` secret. Unit checks only." >> "$GITHUB_STEP_SUMMARY"
               ;;
           esac
+        env:
+          STATE: ${{ steps.sibling_install.outputs.state }}
+          SIBLING: ${{ inputs.sibling-repo }}
+          PROBE: ${{ inputs.sibling-probe-module }}
+
+      - name: Lint and typecheck verdict
+        if: always() && (inputs.lint || inputs.typecheck)
+        run: |
+          failed=0
+          note() { echo "$1" >> "$GITHUB_STEP_SUMMARY"; }
+          if [ "${RUFF_INSTALL}" = "failure" ]; then
+            echo "::error title=Lint could not run::installing ruff failed"
+            failed=1
+          fi
+          if [ "${RUFF_CHECK}" = "failure" ] || [ "${RUFF_FORMAT}" = "failure" ]; then
+            if [ "${LINT_STRICT}" = "true" ]; then
+              echo "::error title=Lint failed::see the ruff steps above"
+              failed=1
+            else
+              note "### Lint is advisory"
+              note ""
+              note "\`lint-strict\` is false, so ruff findings above did not fail the build."
+              note "Clear the backlog, then set \`lint-strict: true\` in this repo's caller workflow."
+            fi
+          fi
+          if [ "${MYPY}" = "failure" ]; then
+            if [ "${TYPECHECK_STRICT}" = "true" ]; then
+              echo "::error title=Typecheck failed::see the mypy step above"
+              failed=1
+            else
+              note "### Typecheck is advisory: \`typecheck-strict\` is false."
+            fi
+          fi
+          exit "${failed}"
+        env:
+          RUFF_INSTALL: ${{ steps.ruff_install.outcome }}
+          RUFF_CHECK: ${{ steps.ruff_check.outcome }}
+          RUFF_FORMAT: ${{ steps.ruff_format.outcome }}
+          MYPY: ${{ steps.mypy.outcome }}
+          LINT_STRICT: ${{ inputs.lint-strict }}
+          TYPECHECK_STRICT: ${{ inputs.typecheck-strict }}

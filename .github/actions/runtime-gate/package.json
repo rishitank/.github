@@ -1,0 +1,18 @@
+{
+  "name": "runtime-gate",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Boot-and-use runtime checks for web apps: a deterministic crawler that fails on runtime errors, plus an advisory Gemini-driven explorer.",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "pixelmatch": "8.0.0",
+    "playwright": "1.64.0",
+    "pngjs": "7.0.0"
+  }
+}

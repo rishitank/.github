@@ -1,0 +1,64 @@
+# Runs the shared security and python-ci workflows on this repository, on the
+# pull request that changes them, before v1 moves and every consuming
+# repository picks the change up.
+#
+# Why here: every consuming repository is private, and their Actions minutes
+# are the scarce ones. This repository is public, so these runs cost nothing,
+# and a broken change fails here instead of in fifteen private repositories.
+# Only pull requests that touch the workflows under test (or this file, or
+# its fixture) run it, so it adds nothing to unrelated pull requests.
+name: reusable-selftest
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/security.yml"
+      - ".github/workflows/python-ci.yml"
+      - ".github/workflows/reusable-selftest.yml"
+      - "tests/python-ci/**"
+  workflow_dispatch:
+
+concurrency:
+  group: reusable-selftest-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # osv-scanner over the runtime-gate action's package-lock.json, gitleaks
+  # over this repository's full history, and the Verdict step. The ecosystem
+  # audit steps are not exercised: this repository has no npm, Python or Rust
+  # project at its root, so the default ecosystem (none) skips them.
+  #
+  # runs-on is pinned to GitHub-hosted runners for both jobs: this repository
+  # is public, python-ci evals its commands, and a pull request from a fork
+  # must never reach the self-hosted runner that vars.CI_RUNNER may select.
+  # Hosted minutes are free here.
+  security:
+    name: security
+    uses: ./.github/workflows/security.yml
+    permissions:
+      contents: read
+    with:
+      runs-on: ubuntu-latest
+
+  # Every lint, typecheck and verify step of the single verify job, strict:
+  # ruff check, ruff format, mypy, the verify command and the verdict. The
+  # sibling-repo and extra-install steps are not exercised. The fixture is
+  # clean, so any failure is the workflow's, not the code's.
+  python-ci:
+    name: python-ci
+    uses: ./.github/workflows/python-ci.yml
+    permissions:
+      contents: read
+    with:
+      runs-on: ubuntu-latest
+      install: python -m pip --version
+      verify: python tests/python-ci/check.py
+      lint-strict: true
+      lint-paths: tests/python-ci
+      ruff-version: "0.16.10"
+      typecheck: true
+      typecheck-strict: true
+      typecheck-paths: tests/python-ci

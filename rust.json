@@ -11,10 +11,11 @@
       "minimumReleaseAge": "14 days"
     },
     {
-      "description": "Patch bumps across the crate graph are noisy individually and useful together.",
+      "description": "Patch bumps across the crate graph are noisy individually and useful together. Ride in the monthly automerge group.",
       "matchManagers": ["cargo"],
       "matchUpdateTypes": ["patch"],
-      "groupName": "cargo patch updates",
+      "groupName": "non-major (automerge)",
+      "groupSlug": "non-major-automerge",
       "automerge": true
     }
   ]
