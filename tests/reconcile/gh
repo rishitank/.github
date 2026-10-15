@@ -10,6 +10,7 @@ State shape:
       rulesets: {id: body},
       workflows: {path: yaml text} | null (listing fails with 500),
       deny_rulesets: 403|500|null  (writes to rulesets refused)
+      fail_readback: bool          (reading settings fails with 500 after a PATCH)
   }}
 Every call is appended to $MOCK_STATE.log as "METHOD path".
 """
@@ -92,7 +93,9 @@ if len(p) == 3:
         for k, v in body.items():
             if k not in r.get("drop_settings", []):
                 r["settings"][k] = v
+        r["patched"] = True
         save(); out({})
+    if r.get("fail_readback") and r.get("patched"): err("Server Error (HTTP 500)")
     out(r["settings"])
 
 if p[3] == "contents":

@@ -147,6 +147,10 @@ check "read-back mismatch: exit 1, NOT-APPLIED" '[ "$RC" = 1 ] && has "was accep
 fresh_state; set_state '.repos["rishitank/alpha"].drop_settings = ["allow_auto_merge"]'
 run false
 check "setting silently dropped: exit 1, NOT-APPLIED named" '[ "$RC" = 1 ] && has "NOT-APPLIED:allow_auto_merge"'
+fresh_state; set_state '.repos["rishitank/alpha"].fail_readback = true'
+run false
+check "settings read-back 500 on alpha: exit 1, NOT-APPLIED:unverified, run not aborted" '[ "$RC" = 1 ] && has "rishitank/alpha: settings were written but could not be read back" && has "NOT-APPLIED:unverified" && has "2 repositories"'
+check "settings read-back 500 on alpha: alpha rulesets and beta still reconciled" '[ "$(rs alpha review-gate | jq -r .enforcement)" = active ] && [ "$(rs beta review-gate | jq -r .enforcement)" = active ]'
 fresh_state; set_state '.repos = {"rishitank/forked": {settings: {}, rulesets: {}, fork: true}}'
 run false
 check "nothing to reconcile: exit 1, not a silent success" '[ "$RC" = 1 ] && has "No repositories returned"'

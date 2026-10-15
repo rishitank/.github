@@ -129,8 +129,12 @@ bot's (Renovate merges its own), a draft, or one labelled
 account-wide token every cross-repository workflow in this repository shares
 (`branch-prune`, `delete-branch`, `draft-reminder` too): a fine-grained
 token for **All repositories** with **Administration**, **Contents** and **Pull
-requests** (read and write). Without it, or when GitHub refuses it, they
-report `NEEDS-TOKEN` and change nothing, rather than failing every run.
+requests** (read and write). Without it they report `NEEDS-TOKEN` and change
+nothing. When GitHub refuses a single read or write they report `NEEDS-TOKEN`
+for that repository or pull request and carry on with the rest, so a run with
+a refusal may still have changed other repositories or armed other pull
+requests. Either way the run doesn't fail, so a token only a person can fix
+doesn't turn it red every night.
 Merges armed with it are made as the owner, so `on: push` workflows fire
 after them, and the review gate still applies: it has no bypass for the owner.
 

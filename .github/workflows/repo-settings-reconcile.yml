@@ -220,9 +220,15 @@ jobs:
               note="settings:$(echo "${diff}" | jq -c .)"
               if [ "${DRY_RUN}" != "true" ]; then
                 if out=$(echo "${diff}" | gh api -X PATCH "repos/${repo}" --input - 2>&1); then
-                  after=$(gh api "repos/${repo}" --jq "{${KEYS}}")
-                  stuck=$(jq -rn --argjson cur "${after}" --argjson want "${DESIRED}" \
-                    '$want | with_entries(select(.value != $cur[.key])) | keys | join(",")')
+                  # READ BACK. A failed read must not abort the run under
+                  # set -e: the other repositories still get reconciled.
+                  if ! after=$(gh api "repos/${repo}" --jq "{${KEYS}}" 2>&1); then
+                    stuck="unverified"
+                    echo "::warning::${repo}: settings were written but could not be read back: ${after}"
+                  else
+                    stuck=$(jq -rn --argjson cur "${after}" --argjson want "${DESIRED}" \
+                      '$want | with_entries(select(.value != $cur[.key])) | keys | join(",")')
+                  fi
                   if [ -n "${stuck}" ]; then
                     note="${note} NOT-APPLIED:${stuck}"
                     failed=$((failed + 1))
