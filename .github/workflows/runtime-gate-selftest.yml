@@ -27,7 +27,7 @@ permissions:
 jobs:
   toolkit:
     name: Toolkit self-test
-    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ${{ (github.event.repository.visibility != 'public' && vars.CI_RUNNER) || 'ubuntu-latest' }}
     timeout-minutes: 20
     permissions:
       contents: read

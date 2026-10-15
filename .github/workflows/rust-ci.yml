@@ -15,7 +15,13 @@ on:
         type: string
         default: stable
       runs-on:
-        description: Empty follows the CI_RUNNER variable, then ubuntu-latest.
+        description: >-
+          Runner label. Empty (the default) follows the calling repository's
+          CI_RUNNER variable, which moves CI onto a fallback runner when the
+          included Actions minutes run out, and means ubuntu-latest when that
+          variable is unset. A public repository ignores CI_RUNNER: its
+          minutes are free, and a fork's pull request must never reach a
+          self-hosted runner.
         type: string
         default: ""
       working-directory:
@@ -48,7 +54,7 @@ permissions:
 jobs:
   verify:
     name: Verify
-    runs-on: ${{ inputs.runs-on || vars.CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ${{ inputs.runs-on || (github.event.repository.visibility != 'public' && vars.CI_RUNNER) || 'ubuntu-latest' }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       contents: read
