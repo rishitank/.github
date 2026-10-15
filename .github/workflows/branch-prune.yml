@@ -37,8 +37,9 @@
 # which defaults to dry-run. Both deletions and the setting change follow it.
 #
 # TOKEN. GITHUB_TOKEN only reaches this repository, so this needs a
-# fine-grained PAT in the repository secret PRUNE_TOKEN. Without it the job
-# explains how to create one and exits green, doing nothing.
+# fine-grained PAT in the repository secret ACCOUNT_ADMIN_TOKEN, the one
+# account-wide token every cross-repository workflow here shares. Without it
+# the job explains how to create one and exits green, doing nothing.
 name: branch-prune
 
 on:
@@ -70,35 +71,35 @@ jobs:
     name: Prune merged branches
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    # Checkout only. Every API call uses PRUNE_TOKEN, never GITHUB_TOKEN.
+    # Checkout only. Every API call uses ACCOUNT_ADMIN_TOKEN, never GITHUB_TOKEN.
     permissions:
       contents: read
     steps:
-      - name: Check for PRUNE_TOKEN
+      - name: Check for ACCOUNT_ADMIN_TOKEN
         id: token
         env:
-          PRUNE_TOKEN: ${{ secrets.PRUNE_TOKEN }}
+          ACCOUNT_ADMIN_TOKEN: ${{ secrets.ACCOUNT_ADMIN_TOKEN }}
         run: |
           set -euo pipefail
-          if [ -n "${PRUNE_TOKEN}" ]; then
+          if [ -n "${ACCOUNT_ADMIN_TOKEN}" ]; then
             echo "present=true" >> "${GITHUB_OUTPUT}"
             exit 0
           fi
           echo "present=false" >> "${GITHUB_OUTPUT}"
-          echo "::notice title=branch-prune skipped::PRUNE_TOKEN is not set, so nothing was checked or deleted. See the job summary for how to create it."
+          echo "::notice title=branch-prune skipped::ACCOUNT_ADMIN_TOKEN is not set, so nothing was checked or deleted. See the job summary for how to create it."
           {
             echo "### Merged-branch prune: not configured"
             echo
-            echo "The repository secret \`PRUNE_TOKEN\` is not set, so this run did nothing."
+            echo "The repository secret \`ACCOUNT_ADMIN_TOKEN\` is not set, so this run did nothing."
             echo
             echo "1. GitHub -> Settings -> Developer settings -> Personal access tokens -> **Fine-grained tokens** -> Generate new token."
             echo "2. Resource owner: **rishitank**. Repository access: **All repositories**."
             echo "3. Repository permissions:"
             echo "   - **Contents: Read and write** (read branches; delete refs in apply mode; GitHub only shows merge settings to a token with it)"
-            echo "   - **Pull requests: Read-only** (which branches were merged)"
+            echo "   - **Pull requests: Read and write** (this workflow only reads which branches were merged; the other workflows sharing the token comment on and auto-merge pull requests)"
             echo "   - **Administration: Read and write** (reading branch protection; turning on *Automatically delete head branches* in apply mode)"
             echo "   - **Metadata: Read-only** (added automatically)"
-            echo "4. Copy the token into this repository: Settings -> Secrets and variables -> Actions -> New repository secret, name \`PRUNE_TOKEN\`."
+            echo "4. Copy the token into this repository: Settings -> Secrets and variables -> Actions -> New repository secret, name \`ACCOUNT_ADMIN_TOKEN\`."
             echo "5. Run this workflow by hand with \`mode: dry-run\` and read the report: the branches it would delete, and the repositories where it would turn on *Automatically delete head branches*."
             echo "6. To let the nightly run delete and turn the setting on, add the repository variable \`PRUNE_APPLY\` = \`true\`."
             echo
@@ -136,7 +137,7 @@ jobs:
       - name: Prune
         if: steps.token.outputs.present == 'true'
         env:
-          GH_TOKEN: ${{ secrets.PRUNE_TOKEN }}
+          GH_TOKEN: ${{ secrets.ACCOUNT_ADMIN_TOKEN }}
           OWNER: ${{ github.repository_owner }}
           MODE: ${{ steps.mode.outputs.mode }}
         run: |
