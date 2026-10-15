@@ -1,17 +1,40 @@
 # Sweeps branches whose pull request was merged, across every repository this
-# account owns.
+# account owns, and turns on "Automatically delete head branches"
+# (`delete_branch_on_merge`) wherever that is safe.
 #
-# `delete_branch_on_merge` only works going forward, so every branch from a PR
-# merged before it was switched on stays forever. This clears that backlog,
-# and anything the setting misses later, under narrow rules: merged at the
-# branch's current tip, not the default branch, not protected, no deletion
-# ruleset, no open PR on it, not a long-lived name. Everything else is
-# reported, never deleted. The rules are in scripts/prune-merged-branches.sh,
-# the same file TanksterAI/.github runs for the organisation.
+# The setting only works going forward, so every branch from a PR merged
+# before it was switched on stays forever. With it on, new merges clean up
+# immediately and this sweep only mops up that backlog, and anything the
+# setting misses, under narrow rules: merged at the branch's current tip,
+# not the default branch, not protected, no deletion ruleset, no open PR on
+# it, not a long-lived name. Everything else is reported, never deleted. The
+# rules are in scripts/prune-merged-branches.sh. TanksterAI/.github runs an
+# earlier copy of that file, without the setting step: its
+# repo-settings-reconcile job already enforces delete_branch_on_merge from
+# settings.yml.
+#
+# SAFE ONLY. GitHub's automatic deletion ignores the sweep's keep pattern:
+# its docs name only branch protection rules and rulesets as stopping it, so
+# merging a develop -> main PR deletes an unprotected `develop`, and private
+# repositories on the Free plan cannot protect branches at all. The setting is
+# read on every scanned (not archived, not forked) repository and, in apply
+# mode, turned on (then read back) only where every long-lived branch (keep
+# pattern, not the default branch) is verifiably protected from deletion: a
+# ruleset deletion rule, or classic branch protection that does not allow
+# deletions (a protected branch can still allow them). Otherwise it is
+# left off and reported as `unsafe` with the branch names; if it is already
+# on there, it is left on and reported as `at_risk` with a warning. A branch
+# whose protection cannot be read makes the repository `unknown`, and the
+# setting is never turned on over it. None of these fails the run. There is
+# no opt-out: a safe repository where the setting was turned off by hand is
+# turned back on, and the report says so. A setting the token cannot read or
+# change is reported as unknown with a warning and does not fail the run; a
+# change that fails for any other reason does, like a failed deletion. Full
+# rules: the script's header, or `--help`.
 #
 # DRY RUN BY DEFAULT. The nightly run only reports, unless the repository
 # variable PRUNE_APPLY is exactly `true`. A hand-run follows its `mode` input,
-# which defaults to dry-run.
+# which defaults to dry-run. Both deletions and the setting change follow it.
 #
 # TOKEN. GITHUB_TOKEN only reaches this repository, so this needs a
 # fine-grained PAT in the repository secret PRUNE_TOKEN. Without it the job
@@ -24,7 +47,10 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: dry-run reports what would be deleted; apply deletes it.
+        description: >-
+          dry-run reports what would be deleted or turned on; apply deletes it
+          and turns on auto-delete of head branches where long-lived branches
+          are protected.
         type: choice
         options:
           - dry-run
@@ -68,13 +94,15 @@ jobs:
             echo "1. GitHub -> Settings -> Developer settings -> Personal access tokens -> **Fine-grained tokens** -> Generate new token."
             echo "2. Resource owner: **rishitank**. Repository access: **All repositories**."
             echo "3. Repository permissions:"
-            echo "   - **Contents: Read and write** (read branches; delete refs in apply mode)"
+            echo "   - **Contents: Read and write** (read branches; delete refs in apply mode; GitHub only shows merge settings to a token with it)"
             echo "   - **Pull requests: Read-only** (which branches were merged)"
-            echo "   - **Administration: Read-only** (branch rules)"
+            echo "   - **Administration: Read and write** (reading branch protection; turning on *Automatically delete head branches* in apply mode)"
             echo "   - **Metadata: Read-only** (added automatically)"
             echo "4. Copy the token into this repository: Settings -> Secrets and variables -> Actions -> New repository secret, name \`PRUNE_TOKEN\`."
-            echo "5. Run this workflow by hand with \`mode: dry-run\` and read the report."
-            echo "6. To let the nightly run delete, add the repository variable \`PRUNE_APPLY\` = \`true\`."
+            echo "5. Run this workflow by hand with \`mode: dry-run\` and read the report: the branches it would delete, and the repositories where it would turn on *Automatically delete head branches*."
+            echo "6. To let the nightly run delete and turn the setting on, add the repository variable \`PRUNE_APPLY\` = \`true\`."
+            echo
+            echo "The setting is only turned on in repositories whose long-lived branches (\`develop\`, \`staging\`, \`release/*\`, \`deploy-*\`...) are protected from deletion (a ruleset deletion rule, or branch protection that does not allow deletions), because GitHub would otherwise delete them when a pull request from one is merged. The report lists the rest as \`unsafe\`, \`at_risk\` or \`unknown\`."
           } >> "${GITHUB_STEP_SUMMARY}"
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

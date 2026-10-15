@@ -8,6 +8,22 @@
 #   gitleaks     secrets, CLI form (MIT). The gitleaks *Action* needs a licence
 #                key for org-owned repos; the CLI does not.
 #   native audit npm audit / pip-audit / cargo-audit for ecosystem-specific advisories
+#
+# ONE JOB, ON PURPOSE. These were three jobs until Oct 2026. GitHub bills
+# every job rounded up to a whole minute and the fallback runner boots a VM
+# per job, so three jobs doing ~45 s of work between them billed 3 minutes
+# (8 on Rust, where `cargo install cargo-audit` compiled from source for ~6
+# minutes). Now the blocking scanners run as steps that do not stop each
+# other, and a final step fails the job if either found something.
+#
+# The native audit is advisory (audit-strict false) and its advisories are
+# already in OSV (RustSec, PyPA/PYSEC and GHSA are all OSV sources), so it
+# runs on the weekly schedule and on manual runs, not on every PR and push.
+# A caller that sets audit-strict gets it on every run, as before.
+#
+# No step pushes, so the checkout keeps no token: the audit step installs and
+# runs third-party code (pip install), which must not find it in
+# .git/config. Actions are pinned to commit SHAs.
 name: security
 
 on:
@@ -18,7 +34,11 @@ on:
         type: string
         default: none
       runs-on:
-        description: Empty follows the CI_RUNNER variable, then ubuntu-latest.
+        description: >-
+          Runner label. Empty (the default) follows the repository's
+          CI_RUNNER variable, which moves CI onto a fallback runner when the
+          included Actions minutes run out, and means ubuntu-latest when that
+          variable is unset.
         type: string
         default: ""
       osv:
@@ -67,41 +87,44 @@ permissions:
   contents: read
 
 jobs:
-  dependencies:
-    name: Vulnerable dependencies
-    if: inputs.osv
+  scan:
+    name: Security scan
+    # No runner at all when there is nothing to run: every scanner switched
+    # off, or only the advisory audit enabled on a pull request.
+    if: >-
+      inputs.osv || inputs.gitleaks ||
+      (inputs.ecosystem != 'none' && (inputs.audit-strict || github.event_name != 'pull_request'))
     runs-on: ${{ inputs.runs-on || vars.CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v7.0.1
-
-      # The sub-action, not the reusable workflow: the reusable one uploads
-      # SARIF to code scanning, which needs GitHub Code Security on private
-      # repos. This one just scans and exits non-zero on findings.
-      - name: osv-scanner
-        uses: google/osv-scanner-action/osv-scanner-action@v2.5.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          scan-args: ${{ inputs.osv-scan-args }}
-
-  secrets:
-    name: Secrets
-    if: inputs.gitleaks
-    runs-on: ${{ inputs.runs-on || vars.CI_RUNNER || 'ubuntu-latest' }}
-    timeout-minutes: ${{ inputs.timeout-minutes }}
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@v7.0.1
-        with:
+          persist-credentials: false
           # Full history so `gitleaks git` can see secrets that were committed
           # and later deleted. fetch-depth: 0 is required for that to mean anything.
           # Quoted deliberately: in GitHub expressions 0 is falsy, so an unquoted
           # `x && 0 || 1` always yields 1. The strings are both truthy.
-          fetch-depth: ${{ inputs.gitleaks-history && '0' || '1' }}
+          fetch-depth: ${{ inputs.gitleaks && inputs.gitleaks-history && '0' || '1' }}
+
+      # The sub-action, not the reusable workflow: the reusable one uploads
+      # SARIF to code scanning, which needs GitHub Code Security on private
+      # repos. This one just scans and exits non-zero on findings.
+      # continue-on-error so gitleaks still runs; the verdict step below fails
+      # the job on its outcome.
+      - name: Vulnerable dependencies (osv-scanner)
+        id: osv
+        if: inputs.osv
+        continue-on-error: true
+        uses: google/osv-scanner-action/osv-scanner-action@8deb546fdb875b9996d27d4950be7312dac076a1 # v2.5.0
+        with:
+          scan-args: ${{ inputs.osv-scan-args }}
 
       - name: Install gitleaks
+        id: gitleaks-install
+        if: inputs.gitleaks
+        continue-on-error: true
         run: |
           set -euo pipefail
           url="https://github.com/gitleaks/gitleaks/releases/download/v${VERSION}/gitleaks_${VERSION}_linux_x64.tar.gz"
@@ -112,7 +135,10 @@ jobs:
         env:
           VERSION: ${{ inputs.gitleaks-version }}
 
-      - name: Scan
+      - name: Secrets (gitleaks)
+        id: gitleaks
+        if: inputs.gitleaks && steps.gitleaks-install.outcome == 'success'
+        continue-on-error: true
         run: |
           set -euo pipefail
           if [ "${HISTORY}" = "true" ]; then
@@ -123,28 +149,46 @@ jobs:
         env:
           HISTORY: ${{ inputs.gitleaks-history }}
 
-  audit:
-    name: Ecosystem audit
-    if: inputs.ecosystem != 'none'
-    runs-on: ${{ inputs.runs-on || vars.CI_RUNNER || 'ubuntu-latest' }}
-    timeout-minutes: ${{ inputs.timeout-minutes }}
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@v7.0.1
-
-      - uses: actions/setup-node@v7.0.0
-        if: inputs.ecosystem == 'node'
+      # Advisory audit: weekly and on demand, or every run when strict.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        # Advisory unless strict: a failed install must not turn the run red.
+        continue-on-error: ${{ !inputs.audit-strict }}
+        if: >-
+          inputs.ecosystem == 'node' &&
+          (inputs.audit-strict || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
         with:
           node-version-file: ${{ inputs.node-version-file }}
 
-      - uses: actions/setup-python@v7.0.0
-        if: inputs.ecosystem == 'python'
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        # Advisory unless strict: a failed install must not turn the run red.
+        continue-on-error: ${{ !inputs.audit-strict }}
+        if: >-
+          inputs.ecosystem == 'python' &&
+          (inputs.audit-strict || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
         with:
           python-version: ${{ inputs.python-version }}
 
-      - name: Audit
+      # A prebuilt binary in seconds, instead of `cargo install` compiling it
+      # for ~6 minutes. Run as `cargo-audit audit` so no Rust toolchain is
+      # needed: the fallback runner has rustup with no default toolchain, so
+      # `cargo audit` failed there in under a second, hidden by
+      # continue-on-error.
+      - name: Install cargo-audit
+        # Advisory unless strict: a failed install must not turn the run red.
         continue-on-error: ${{ !inputs.audit-strict }}
+        if: >-
+          inputs.ecosystem == 'rust' &&
+          (inputs.audit-strict || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+        uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
+        with:
+          tool: cargo-audit
+
+      - name: Ecosystem audit
+        id: audit
+        if: >-
+          inputs.ecosystem != 'none' &&
+          (inputs.audit-strict || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+        continue-on-error: true
         run: |
           set -euo pipefail
           case "${ECOSYSTEM}" in
@@ -152,17 +196,24 @@ jobs:
               npm audit --audit-level="${AUDIT_LEVEL}"
               ;;
             python)
-              pip install pip-audit
+              python -m pip install pip-audit
               if [ -f requirements.txt ]; then
                 pip-audit -r requirements.txt
               else
-                pip install -e .
+                python -m pip install -e .
                 pip-audit
               fi
               ;;
             rust)
-              cargo install cargo-audit --locked
-              cargo audit
+              if [ ! -f Cargo.lock ]; then
+                if [ "${STRICT}" = "true" ]; then
+                  echo "::error title=No Cargo.lock::cargo-audit needs a lockfile, and audit-strict is true."
+                  exit 1
+                fi
+                echo "::notice title=No Cargo.lock::cargo-audit needs a lockfile; skipped."
+                exit 0
+              fi
+              cargo-audit audit
               ;;
             *)
               echo "::error title=Unknown ecosystem::'${ECOSYSTEM}' is not one of node, python, rust, none."
@@ -172,13 +223,40 @@ jobs:
         env:
           ECOSYSTEM: ${{ inputs.ecosystem }}
           AUDIT_LEVEL: ${{ inputs.audit-level }}
+          STRICT: ${{ inputs.audit-strict }}
 
-      - name: Note advisory mode
-        if: ${{ !inputs.audit-strict }}
+      - name: Verdict
+        if: always()
         run: |
           {
-            echo "### Ecosystem audit is advisory"
+            echo "### Security scan"
             echo
-            echo "\`audit-strict\` is false, so findings above did not fail the build."
-            echo "osv-scanner and gitleaks are blocking regardless."
+            echo "| Scanner | Outcome |"
+            echo "|---|---|"
+            echo "| osv-scanner (blocking) | ${OSV:-skipped} |"
+            echo "| gitleaks (blocking) | ${GITLEAKS_INSTALL:+install ${GITLEAKS_INSTALL}, }scan ${GITLEAKS:-skipped} |"
+            echo "| ${ECOSYSTEM} audit ($([ "${STRICT}" = "true" ] && echo blocking || echo "advisory, weekly")) | ${AUDIT:-skipped} |"
           } >> "$GITHUB_STEP_SUMMARY"
+          failed=0
+          for pair in "osv-scanner:${OSV}" "gitleaks install:${GITLEAKS_INSTALL}" "gitleaks:${GITLEAKS}"; do
+            if [ "${pair#*:}" = "failure" ]; then
+              echo "::error title=${pair%%:*} failed::see its step above"
+              failed=1
+            fi
+          done
+          if [ "${AUDIT}" = "failure" ]; then
+            if [ "${STRICT}" = "true" ]; then
+              echo "::error title=Ecosystem audit failed::audit-strict is true"
+              failed=1
+            else
+              echo "::warning title=Ecosystem audit findings (advisory)::see the Ecosystem audit step"
+            fi
+          fi
+          exit "${failed}"
+        env:
+          OSV: ${{ steps.osv.outcome }}
+          GITLEAKS_INSTALL: ${{ steps.gitleaks-install.outcome }}
+          GITLEAKS: ${{ steps.gitleaks.outcome }}
+          AUDIT: ${{ steps.audit.outcome }}
+          ECOSYSTEM: ${{ inputs.ecosystem }}
+          STRICT: ${{ inputs.audit-strict }}
