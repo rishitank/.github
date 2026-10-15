@@ -32,11 +32,18 @@
 #
 # PUBLIC LOGS: this repository is public, so its run logs are too. They show
 # what a CI log shows: npm, the Next.js route table, test names and smoke-test
-# status codes. assemble.sh masks the build's per-build secrets, and the token
-# is a secret, so both are redacted. Nothing prints source files.
+# status codes, plus code frames from the e2e specs or src/ if a test or the
+# build fails. assemble.sh masks the build's per-build secrets; the token is a
+# secret, and its base64 Basic-auth form is masked too. git runs with a clean
+# environment (env -i) so nothing an earlier step wrote to $GITHUB_ENV or
+# $GITHUB_PATH (GIT_CURL_VERBOSE, GIT_TRACE_REDACT=0, a shadowing `git`) can
+# make it print or reroute the credential.
 #
-# Only the repository owner can dispatch it, and only from main, so a dispatch
-# on another branch can never run an unreviewed copy with this token.
+# Only the repository owner can dispatch or re-run it, and only from main.
+# Known limits, accepted for now: the secret is repository-wide rather than in
+# a main-only environment (this personal repository has no other writers), and
+# the PAT reaches all of the owner's repositories. A PAT scoped to the
+# portfolio alone, held in a `portfolio-deploy` environment, would narrow both.
 name: deploy-portfolio
 
 on:
@@ -74,7 +81,10 @@ env:
 jobs:
   deploy:
     name: Build, test and promote (${{ inputs.target }}, ${{ inputs.mode }})
-    if: github.ref == 'refs/heads/main' && github.actor == github.repository_owner
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      github.actor == github.repository_owner &&
+      github.triggering_actor == github.repository_owner
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
@@ -92,6 +102,9 @@ jobs:
             echo "::error title=deploy-portfolio::ACCOUNT_ADMIN_TOKEN is not set."
             exit 1
           fi
+          # git sends the credential as Basic base64("x-access-token:<token>");
+          # mask that form too, in case anything ever traces the request.
+          echo "::add-mask::$(printf 'x-access-token:%s' "${GH_TOKEN}" | base64 -w0)"
           if ! printf '%s' "${SHA}" | grep -Eq '^[0-9a-f]{40}$'; then
             echo "::error title=deploy-portfolio::sha must be a full 40-character lowercase commit SHA."
             exit 1
@@ -102,12 +115,12 @@ jobs:
             *) echo "::error title=deploy-portfolio::unknown target ${TARGET}"; exit 1 ;;
           esac
           remote="https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git"
-          tip=$(git ls-remote "${remote}" "refs/heads/${source}" | cut -f1)
+          tip=$(/usr/bin/git ls-remote "${remote}" "refs/heads/${source}" | cut -f1)
           if [ "${tip}" != "${SHA}" ]; then
             echo "::error title=deploy-portfolio::${source} is at ${tip:-nothing}, not ${SHA}. Deploy only the current tip."
             exit 1
           fi
-          previous=$(git ls-remote "${remote}" "refs/heads/${branch}" | cut -f1)
+          previous=$(/usr/bin/git ls-remote "${remote}" "refs/heads/${branch}" | cut -f1)
           {
             echo "source=${source}"
             echo "branch=${branch}"
@@ -140,7 +153,7 @@ jobs:
 
       - name: Install dependencies
         working-directory: portfolio
-        run: npm ci
+        run: npm ci --no-audit --no-fund
 
       - name: Lint
         working-directory: portfolio
@@ -234,19 +247,36 @@ jobs:
           PREVIOUS: ${{ steps.target.outputs.previous }}
         run: |
           set -euo pipefail
-          git init -q -b "${BRANCH}"
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # git with a clean environment and no user or system config, so
+          # nothing an earlier step planted in $GITHUB_ENV, $GITHUB_PATH or
+          # ~/.gitconfig can trace, redirect or log the credential.
+          g() {
+            env -i PATH=/usr/bin:/bin HOME="${RUNNER_TEMP}" \
+              GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_TRACE_REDACT=1 \
+              GIT_TERMINAL_PROMPT=0 /usr/bin/git "$@"
+          }
+          remote="https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git"
+          # The source must still be at the commit that was built and tested.
+          tip=$(g ls-remote "${remote}" "refs/heads/${SOURCE}" | cut -f1)
+          if [ "${tip}" != "${SHA}" ]; then
+            echo "::error title=deploy-portfolio::${SOURCE} moved to ${tip:-nothing} during the run; not deploying ${SHA}."
+            exit 1
+          fi
+          g init -q -b "${BRANCH}"
+          g config user.name "github-actions[bot]"
+          g config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           # --force on add: a package inside node_modules may ship its own
           # .gitignore, and nothing in this tree is optional.
-          git add --all --force
-          git commit -q \
+          g add --all --force
+          g commit -q \
             -m "deploy: ${SOURCE}@${SHA::7} -> ${BRANCH}" \
             -m "Built from ${SHA} by ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}. Generated branch — do not edit."
-          pushed=$(git rev-parse HEAD)
-          remote="https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git"
-          git push --force "${remote}" "HEAD:refs/heads/${BRANCH}"
-          now=$(git ls-remote "${remote}" "refs/heads/${BRANCH}" | cut -f1)
+          pushed=$(g rev-parse HEAD)
+          # Lease on the tip seen at the start: if anything else deployed to
+          # this branch meanwhile (the portfolio's own promote), refuse rather
+          # than overwrite it. An empty PREVIOUS means it must not exist yet.
+          g push --force-with-lease="refs/heads/${BRANCH}:${PREVIOUS}" "${remote}" "HEAD:refs/heads/${BRANCH}"
+          now=$(g ls-remote "${remote}" "refs/heads/${BRANCH}" | cut -f1)
           test "${now}" = "${pushed}"
           {
             echo "### Promoted ${SOURCE}@${SHA::7} to ${BRANCH}"
@@ -256,4 +286,4 @@ jobs:
             echo ""
             echo "Roll back by pushing the previous tip back to \`${BRANCH}\` (force)."
           } >> "$GITHUB_STEP_SUMMARY"
-          echo "Promoted ${SHA::7} to ${BRANCH} as ${pushed::7} (was ${PREVIOUS::7})."
+          echo "Promoted ${SHA::7} to ${BRANCH} as ${pushed::7} (was ${PREVIOUS:-absent})."
