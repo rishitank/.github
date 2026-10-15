@@ -21,6 +21,14 @@
 # does all of that read-only and records the lockfile's hash before the install
 # runs; `commit` runs no dependency code, commits only a lockfile with that
 # hash, and is the only job holding contents: write.
+#
+# The boundary holds because each job gets a fresh machine: GitHub-hosted
+# runners do, and so does the CI_RUNNER fallback, which boots a VM per job. On
+# a persistent self-hosted runner, `lockfile` could leave a process or files
+# behind for `commit` to inherit, so CI_RUNNER must stay ephemeral. `commit`
+# keeps the shared runner expression rather than pinning ubuntu-latest:
+# CI_RUNNER is set when the included minutes run out, which is exactly when a
+# hosted-only job could not run.
 name: lockfile
 
 on:
