@@ -1,0 +1,289 @@
+# Builds rishitank/rishitank-portfolio and promotes it to its deploy branch,
+# by hand, from this public repository.
+#
+# Why this exists: the portfolio is private, so its own CI runs on the
+# account's included Actions minutes, with the Cloud Build fallback when those
+# run out. When both are used up for the month, nothing can run the portfolio's
+# `promote` job, and a merged change waits for the reset. Hosted runners are
+# free for public repositories, so this workflow does what `promote` does from
+# here instead, at no cost.
+#
+# What it runs is the portfolio's own `check` + `playwright` + `promote` path,
+# against an exact commit:
+#   - the commit must be the current tip of the source branch: main for
+#     production, develop for staging;
+#   - lint, typecheck and the functional Playwright suite (Desktop Chrome +
+#     Mobile) must pass;
+#   - then `next build` with the target's NEXT_PUBLIC_ENV, deploy/assemble.sh,
+#     a BUILD_INFO file, the same smoke test as `promote` (routes 200, the
+#     unconfigured demo route 503, keys injected) and
+#     `deploy/build-keys.mjs verify`;
+#   - then, only with `mode: apply`, the tree is force-pushed as an orphan
+#     commit to deploy-production or deploy-staging, which Coolify deploys.
+#     The previous tip is printed first, so a rollback is one push away.
+#
+# DRY RUN BY DEFAULT: `mode: dry-run` does everything except the push.
+#
+# TOKEN: the repository secret ACCOUNT_ADMIN_TOKEN (fine-grained PAT, Contents:
+# Read and write on the portfolio), the same one delete-branch uses. It is
+# handed only to the steps that read or push the portfolio, never to npm or
+# the build, and the checkout keeps no credential. GITHUB_TOKEN only reaches
+# this repository and is not used.
+#
+# PUBLIC LOGS: this repository is public, so its run logs are too. They show
+# what a CI log shows: npm, the Next.js route table, test names and smoke-test
+# status codes, plus code frames from the e2e specs or src/ if a test or the
+# build fails. assemble.sh masks the build's per-build secrets; the token is a
+# secret, and its base64 Basic-auth form is masked too. git runs with a clean
+# environment (env -i) so nothing an earlier step wrote to $GITHUB_ENV or
+# $GITHUB_PATH (GIT_CURL_VERBOSE, GIT_TRACE_REDACT=0, a shadowing `git`) can
+# make it print or reroute the credential.
+#
+# Only the repository owner can dispatch or re-run it, and only from main.
+# Known limits, accepted for now: the secret is repository-wide rather than in
+# a main-only environment (this personal repository has no other writers), and
+# the PAT reaches all of the owner's repositories. A PAT scoped to the
+# portfolio alone, held in a `portfolio-deploy` environment, would narrow both.
+name: deploy-portfolio
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: production builds main into deploy-production; staging builds develop into deploy-staging.
+        type: choice
+        options:
+          - production
+          - staging
+        default: production
+      sha:
+        description: Full 40-character commit SHA. It must be the current tip of the source branch.
+        required: true
+        type: string
+      mode:
+        description: dry-run builds and checks everything; apply also pushes the deploy branch.
+        type: choice
+        options:
+          - dry-run
+          - apply
+        default: dry-run
+
+permissions: {}
+
+concurrency:
+  group: deploy-portfolio-${{ inputs.target }}
+  cancel-in-progress: false
+
+env:
+  REPO: rishitank/rishitank-portfolio
+  NEXT_TELEMETRY_DISABLED: "1"
+
+jobs:
+  deploy:
+    name: Build, test and promote (${{ inputs.target }}, ${{ inputs.mode }})
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      github.actor == github.repository_owner &&
+      github.triggering_actor == github.repository_owner
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - name: Resolve the target and check the commit is the branch tip
+        id: target
+        env:
+          GH_TOKEN: ${{ secrets.ACCOUNT_ADMIN_TOKEN }}
+          TARGET: ${{ inputs.target }}
+          SHA: ${{ inputs.sha }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN}" ]; then
+            echo "::error title=deploy-portfolio::ACCOUNT_ADMIN_TOKEN is not set."
+            exit 1
+          fi
+          # git sends the credential as Basic base64("x-access-token:<token>");
+          # mask that form too, in case anything ever traces the request.
+          echo "::add-mask::$(printf 'x-access-token:%s' "${GH_TOKEN}" | base64 -w0)"
+          if ! printf '%s' "${SHA}" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "::error title=deploy-portfolio::sha must be a full 40-character lowercase commit SHA."
+            exit 1
+          fi
+          case "${TARGET}" in
+            production) source=main; branch=deploy-production; public_env="" ;;
+            staging) source=develop; branch=deploy-staging; public_env=staging ;;
+            *) echo "::error title=deploy-portfolio::unknown target ${TARGET}"; exit 1 ;;
+          esac
+          remote="https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git"
+          tip=$(/usr/bin/git ls-remote "${remote}" "refs/heads/${source}" | cut -f1)
+          if [ "${tip}" != "${SHA}" ]; then
+            echo "::error title=deploy-portfolio::${source} is at ${tip:-nothing}, not ${SHA}. Deploy only the current tip."
+            exit 1
+          fi
+          previous=$(/usr/bin/git ls-remote "${remote}" "refs/heads/${branch}" | cut -f1)
+          {
+            echo "source=${source}"
+            echo "branch=${branch}"
+            echo "public_env=${public_env}"
+            echo "previous=${previous}"
+          } >> "$GITHUB_OUTPUT"
+          echo "Deploying ${source}@${SHA::7} to ${branch} (currently ${previous:-absent})."
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ env.REPO }}
+          ref: ${{ inputs.sha }}
+          token: ${{ secrets.ACCOUNT_ADMIN_TOKEN }}
+          persist-credentials: false
+          path: portfolio
+
+      - name: Confirm the checkout is the requested commit
+        working-directory: portfolio
+        env:
+          SHA: ${{ inputs.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${SHA}"
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "26"
+          cache: npm
+          cache-dependency-path: portfolio/package-lock.json
+
+      - name: Install dependencies
+        working-directory: portfolio
+        run: npm ci --no-audit --no-fund
+
+      - name: Lint
+        working-directory: portfolio
+        run: npm run lint
+
+      - name: Typecheck
+        working-directory: portfolio
+        run: npm run typecheck
+
+      - name: Install Playwright's Chromium
+        working-directory: portfolio
+        run: npx playwright install --with-deps chromium
+
+      - name: Functional suite (Desktop Chrome + Mobile)
+        # The same gate the portfolio's own `promote` needs. webServer builds
+        # and serves the assembled deploy tree, as production does.
+        working-directory: portfolio
+        env:
+          CI: "1"
+        run: npx playwright test --project="Desktop Chrome" --project="Mobile"
+
+      - name: Build for ${{ steps.target.outputs.branch }}
+        working-directory: portfolio
+        env:
+          NEXT_PUBLIC_ENV: ${{ steps.target.outputs.public_env }}
+        run: |
+          set -euo pipefail
+          rm -rf .next
+          npm run build
+
+      - name: Assemble the runtime tree
+        working-directory: portfolio
+        env:
+          SOURCE: ${{ steps.target.outputs.source }}
+          SHA: ${{ inputs.sha }}
+          NEXT_PUBLIC_ENV: ${{ steps.target.outputs.public_env }}
+        run: |
+          set -euo pipefail
+          bash deploy/assemble.sh dist
+          {
+            echo "source_ref=${SOURCE}"
+            echo "source_sha=${SHA}"
+            echo "built_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "node=$(node --version)"
+            echo "next_public_env=${NEXT_PUBLIC_ENV}"
+            echo "run=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          } > dist/BUILD_INFO
+          cat dist/BUILD_INFO
+          du -sh dist
+
+      - name: Smoke-test the tree before promoting it
+        # Same checks as the portfolio's `promote` job, on a copy: the
+        # entrypoint writes real keys into the files it starts, and dist/ must
+        # keep its placeholders.
+        working-directory: portfolio
+        run: |
+          set -euo pipefail
+          smoke="${RUNNER_TEMP}/smoke"
+          rm -rf "${smoke}"
+          cp -a dist "${smoke}"
+          cd "${smoke}"
+          PORT=3210 HOSTNAME=127.0.0.1 sh ./entrypoint.sh > /tmp/server.log 2>&1 &
+          pid=$!
+          for _ in $(seq 1 30); do
+            curl -fsS -o /dev/null http://127.0.0.1:3210/ && break
+            sleep 1
+          done
+          for path in / /projects /projects/agent-egress-proxy /projects/news-brief /robustness-layer /about /contact /sitemap.xml /robots.txt /opengraph-image; do
+            curl -fsS -o /dev/null -w "GET ${path} -> %{http_code}\n" "http://127.0.0.1:3210${path}"
+          done
+          code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3210/api/demo/egress)
+          echo "GET /api/demo/egress (unconfigured) -> ${code}"
+          test "${code}" = "503"
+          node build-keys.mjs check-injected .
+          kill "${pid}"
+
+      - name: Verify the tree carries no build secret
+        working-directory: portfolio
+        run: node deploy/build-keys.mjs verify dist .next
+
+      - name: Force-push the tree to ${{ steps.target.outputs.branch }}
+        if: inputs.mode == 'apply'
+        # An orphan commit each time, exactly like `promote`: the deploy branch
+        # is an artifact, not history. Coolify deploys on the push.
+        working-directory: portfolio/dist
+        env:
+          GH_TOKEN: ${{ secrets.ACCOUNT_ADMIN_TOKEN }}
+          BRANCH: ${{ steps.target.outputs.branch }}
+          SOURCE: ${{ steps.target.outputs.source }}
+          SHA: ${{ inputs.sha }}
+          PREVIOUS: ${{ steps.target.outputs.previous }}
+        run: |
+          set -euo pipefail
+          # git with a clean environment and no user or system config, so
+          # nothing an earlier step planted in $GITHUB_ENV, $GITHUB_PATH or
+          # ~/.gitconfig can trace, redirect or log the credential.
+          g() {
+            env -i PATH=/usr/bin:/bin HOME="${RUNNER_TEMP}" \
+              GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_TRACE_REDACT=1 \
+              GIT_TERMINAL_PROMPT=0 /usr/bin/git "$@"
+          }
+          remote="https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git"
+          # The source must still be at the commit that was built and tested.
+          tip=$(g ls-remote "${remote}" "refs/heads/${SOURCE}" | cut -f1)
+          if [ "${tip}" != "${SHA}" ]; then
+            echo "::error title=deploy-portfolio::${SOURCE} moved to ${tip:-nothing} during the run; not deploying ${SHA}."
+            exit 1
+          fi
+          g init -q -b "${BRANCH}"
+          g config user.name "github-actions[bot]"
+          g config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # --force on add: a package inside node_modules may ship its own
+          # .gitignore, and nothing in this tree is optional.
+          g add --all --force
+          g commit -q \
+            -m "deploy: ${SOURCE}@${SHA::7} -> ${BRANCH}" \
+            -m "Built from ${SHA} by ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}. Generated branch — do not edit."
+          pushed=$(g rev-parse HEAD)
+          # Lease on the tip seen at the start: if anything else deployed to
+          # this branch meanwhile (the portfolio's own promote), refuse rather
+          # than overwrite it. An empty PREVIOUS means it must not exist yet.
+          g push --force-with-lease="refs/heads/${BRANCH}:${PREVIOUS}" "${remote}" "HEAD:refs/heads/${BRANCH}"
+          now=$(g ls-remote "${remote}" "refs/heads/${BRANCH}" | cut -f1)
+          test "${now}" = "${pushed}"
+          {
+            echo "### Promoted ${SOURCE}@${SHA::7} to ${BRANCH}"
+            echo ""
+            echo "- new tip: \`${pushed}\`"
+            echo "- previous tip: \`${PREVIOUS:-absent}\`"
+            echo ""
+            echo "Roll back by pushing the previous tip back to \`${BRANCH}\` (force)."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "Promoted ${SHA::7} to ${BRANCH} as ${pushed::7} (was ${PREVIOUS:-absent})."
