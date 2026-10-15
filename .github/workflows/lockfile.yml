@@ -53,7 +53,7 @@ permissions:
 jobs:
   lockfile:
     name: Regenerate lockfile
-    runs-on: ${{ inputs.runs-on || (github.event.repository.visibility != 'public' && vars.CI_RUNNER) || 'ubuntu-latest' }}
+    runs-on: ${{ inputs.runs-on || (github.event.repository.private && vars.CI_RUNNER) || 'ubuntu-latest' }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       contents: write # the Commit step pushes the regenerated lockfile
@@ -175,7 +175,7 @@ jobs:
           git commit -m "chore: regenerate ${LOCKFILE}"
           # The same header actions/checkout would have persisted, given to
           # this one push through the environment instead of .git/config.
-          auth=$(printf 'x-access-token:%s' "${GH_TOKEN}" | base64 -w0)
+          auth=$(printf 'x-access-token:%s' "${GH_TOKEN}" | base64 | tr -d '\n')
           echo "::add-mask::${auth}"
           GIT_CONFIG_COUNT=1 \
             GIT_CONFIG_KEY_0="http.https://github.com/.extraheader" \
