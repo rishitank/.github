@@ -11,6 +11,16 @@
 #     lockfile must not silently change declared dependency ranges.
 #   * prove the result. A lockfile that resolves but cannot be installed
 #     frozen is worse than no change at all.
+#
+# Two jobs, so that no dependency code ever shares a job with a write token.
+# Proving the lockfile runs `npm ci` / `pnpm install --frozen-lockfile` and the
+# caller's `verify`, i.e. third-party lifecycle scripts. Within one job those
+# can reach the token however it is scoped: from a persisted .git/config, from a
+# git hook or a $GITHUB_ENV / $GITHUB_PATH entry they plant for a later step,
+# or, on a runner with sudo, from the runner process's memory. So `lockfile`
+# does all of that read-only and records the lockfile's hash before the install
+# runs; `commit` runs no dependency code, commits only a lockfile with that
+# hash, and is the only job holding contents: write.
 name: lockfile
 
 on:
@@ -49,9 +59,17 @@ jobs:
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
-      contents: write
+      contents: read
+    outputs:
+      changed: ${{ steps.changed.outputs.changed }}
+      lockfile: ${{ steps.lock.outputs.path }}
+      sum: ${{ steps.changed.outputs.sum }}
     steps:
+      # No persisted token: the proof steps run dependencies' install scripts,
+      # which must not find one in .git/config.
       - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install pnpm
         if: inputs.package-manager == 'pnpm'
@@ -123,6 +141,8 @@ jobs:
 
       # Stage first. `git diff --quiet` cannot see an untracked file, so a
       # brand-new lockfile would otherwise report as "already up to date".
+      # The hash is taken here, before the proof steps run any dependency
+      # code, and `commit` refuses any lockfile that does not match it.
       - name: Stage and check for changes
         id: changed
         run: |
@@ -133,6 +153,7 @@ jobs:
             echo "${LOCKFILE} already up to date; nothing to commit."
           else
             echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "sum=$(sha256sum "${LOCKFILE}" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
             echo "${LOCKFILE}: $(wc -l < "${LOCKFILE}") lines"
           fi
         env:
@@ -154,13 +175,77 @@ jobs:
         if: steps.changed.outputs.changed == 'true' && inputs.verify != ''
         run: ${{ inputs.verify }}
 
-      - name: Commit
+      - name: Upload the proven lockfile
         if: steps.changed.outputs.changed == 'true'
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: lockfile
+          path: ${{ steps.lock.outputs.path }}
+          if-no-files-found: error
+          retention-days: 1
+
+  commit:
+    name: Commit lockfile
+    needs: lockfile
+    if: needs.lockfile.outputs.changed == 'true'
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      # No persisted token either: only the Commit step below gets one.
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Download the proven lockfile
+        uses: actions/download-artifact@v8.0.2
+        with:
+          name: lockfile
+          path: ${{ runner.temp }}/lockfile
+
+      # The artifact was uploaded after dependency code ran, so it is checked
+      # against the hash recorded before that, not trusted as is.
+      - name: Stage the proven lockfile
         run: |
           set -euo pipefail
+          dir="${RUNNER_TEMP}/lockfile"
+          src="${dir}/${LOCKFILE}"
+          if [ "$(find "${dir}" -mindepth 1 | wc -l)" -ne 1 ] || [ -L "${src}" ] || [ ! -f "${src}" ]; then
+            echo "::error title=Unexpected artifact::The lockfile artifact must hold exactly one regular file, ${LOCKFILE}."
+            find "${dir}" -mindepth 1 -exec ls -ld {} +
+            exit 1
+          fi
+          sum=$(sha256sum "${src}" | cut -d' ' -f1)
+          if [ "${sum}" != "${EXPECTED}" ]; then
+            echo "::error title=Lockfile changed after it was hashed::${LOCKFILE} is not the file the lockfile job hashed before proving it (expected ${EXPECTED}, got ${sum}). Refusing to commit it."
+            exit 1
+          fi
+          cp -- "${src}" "${LOCKFILE}"
+          git add -- "${LOCKFILE}"
+          staged=$(git diff --cached --name-only)
+          if [ "${staged}" != "${LOCKFILE}" ]; then
+            echo "::error title=Unexpected staged changes::Expected only ${LOCKFILE} to be staged, got: ${staged:-nothing}"
+            exit 1
+          fi
+        env:
+          LOCKFILE: ${{ needs.lockfile.outputs.lockfile }}
+          EXPECTED: ${{ needs.lockfile.outputs.sum }}
+
+      # The token reaches this step only, and only through the push URL, never
+      # through git config. The host comes from GITHUB_SERVER_URL, as the
+      # checkout's origin URL does.
+      - name: Commit
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_REF_TYPE}" != "branch" ]; then
+            echo "::error title=Not a branch::Run this from a branch; ${GITHUB_REF} is a ${GITHUB_REF_TYPE}."
+            exit 1
+          fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git commit -m "chore: regenerate ${LOCKFILE}"
-          git push
+          git push "https://x-access-token:${GH_TOKEN}@${GITHUB_SERVER_URL#https://}/${GITHUB_REPOSITORY}.git" "HEAD:refs/heads/${GITHUB_REF_NAME}"
         env:
-          LOCKFILE: ${{ steps.lock.outputs.path }}
+          LOCKFILE: ${{ needs.lockfile.outputs.lockfile }}
+          GH_TOKEN: ${{ github.token }}
