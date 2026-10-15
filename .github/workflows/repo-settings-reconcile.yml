@@ -13,7 +13,7 @@
 #   differs, then read back. A repository ruleset with any other name is
 #   never touched.
 #
-# TOKEN. `PERSONAL_ADMIN_TOKEN`: a fine-grained personal access token for
+# TOKEN. `ACCOUNT_ADMIN_TOKEN`: a fine-grained personal access token for
 # "All repositories" with Administration (read and write) and Contents
 # (read). The default GITHUB_TOKEN can't write to other repositories. Without
 # the secret, or when GitHub refuses it, the run says NEEDS-TOKEN and changes
@@ -57,7 +57,7 @@ jobs:
 
       - name: Reconcile
         env:
-          GH_TOKEN: ${{ secrets.PERSONAL_ADMIN_TOKEN }}
+          GH_TOKEN: ${{ secrets.ACCOUNT_ADMIN_TOKEN }}
           OWNER: ${{ github.repository_owner }}
           # Scheduled runs and a push to settings.yml apply. A hand-run
           # defaults to reporting, so nobody finds out the blast radius by
@@ -68,11 +68,11 @@ jobs:
           POLICY=settings.yml
 
           needs_token() {
-            echo "::warning title=NEEDS-TOKEN::$1 Add or fix the PERSONAL_ADMIN_TOKEN secret: a fine-grained token for All repositories with Administration (read and write) and Contents (read). Nothing was changed."
+            echo "::warning title=NEEDS-TOKEN::$1 Add or fix the ACCOUNT_ADMIN_TOKEN secret: a fine-grained token for All repositories with Administration (read and write) and Contents (read). Nothing was changed."
             echo "NEEDS-TOKEN: $1" >> "${GITHUB_STEP_SUMMARY}"
           }
           if [ -z "${GH_TOKEN}" ]; then
-            needs_token "PERSONAL_ADMIN_TOKEN is not set."
+            needs_token "ACCOUNT_ADMIN_TOKEN is not set."
             exit 0
           fi
           command -v yq >/dev/null || { echo "::error::yq not found on runner"; exit 1; }
@@ -197,7 +197,7 @@ jobs:
           refused() {
             if grep -qE "HTTP 40[134]|Bad credentials|Resource not accessible" <<< "$3"; then
               blocked=$((blocked + 1))
-              echo "::warning title=NEEDS-TOKEN::${1}: GitHub refused ${2}. PERSONAL_ADMIN_TOKEN needs Administration (read and write) on all repositories."
+              echo "::warning title=NEEDS-TOKEN::${1}: GitHub refused ${2}. ACCOUNT_ADMIN_TOKEN needs Administration (read and write) on all repositories."
             else
               failed=$((failed + 1))
               echo "::warning::${1}: could not ${2}: ${3}"

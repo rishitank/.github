@@ -20,7 +20,7 @@
 # (Renovate merges its own), a draft, or one labelled `needs-human-review`.
 # A label added after arming is honoured on the next run: it disarms.
 #
-# TOKEN. `PERSONAL_ADMIN_TOKEN` (Pull requests and Contents: read and write,
+# TOKEN. `ACCOUNT_ADMIN_TOKEN` (Pull requests and Contents: read and write,
 # All repositories). The merge is then made as the owner, so `on: push`
 # workflows fire after it, and the review gate still applies: it has no
 # bypass for the owner. Without the secret, or when GitHub refuses it, the run
@@ -54,7 +54,7 @@ jobs:
     steps:
       - name: Sweep
         env:
-          GH_TOKEN: ${{ secrets.PERSONAL_ADMIN_TOKEN }}
+          GH_TOKEN: ${{ secrets.ACCOUNT_ADMIN_TOKEN }}
           OWNER: ${{ github.repository_owner }}
           DRY_RUN: ${{ github.event_name == 'schedule' && 'false' || inputs.dry-run }}
           OPT_OUT: needs-human-review
@@ -63,10 +63,10 @@ jobs:
 
           say() { echo "$1"; echo "- $1" >> "${GITHUB_STEP_SUMMARY}"; }
           needs_token() {
-            echo "::warning title=NEEDS-TOKEN::$1 Add or fix the PERSONAL_ADMIN_TOKEN secret: Pull requests and Contents (read and write) on All repositories. Nothing was armed."
+            echo "::warning title=NEEDS-TOKEN::$1 Add or fix the ACCOUNT_ADMIN_TOKEN secret: Pull requests and Contents (read and write) on All repositories. Nothing was armed."
             echo "NEEDS-TOKEN: $1" >> "${GITHUB_STEP_SUMMARY}"
           }
-          if [ -z "${GH_TOKEN}" ]; then needs_token "PERSONAL_ADMIN_TOKEN is not set."; exit 0; fi
+          if [ -z "${GH_TOKEN}" ]; then needs_token "ACCOUNT_ADMIN_TOKEN is not set."; exit 0; fi
 
           # Every open pull request in the owner's public repositories. Drafts,
           # authors and labels are judged from `gh pr view` below, which is

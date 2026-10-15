@@ -125,7 +125,9 @@ never arms a stranger's pull request (these repositories are public), a
 bot's (Renovate merges its own), a draft, or one labelled
 `needs-human-review`; adding that label later disarms it on the next run.
 
-**Token.** Both need the `PERSONAL_ADMIN_TOKEN` secret here: a fine-grained
+**Token.** Both need the `ACCOUNT_ADMIN_TOKEN` secret here, the one
+account-wide token every cross-repository workflow in this repository shares
+(`branch-prune`, `delete-branch`, `draft-reminder` too): a fine-grained
 token for **All repositories** with **Administration**, **Contents** and **Pull
 requests** (read and write). Without it, or when GitHub refuses it, they
 report `NEEDS-TOKEN` and change nothing, rather than failing every run.

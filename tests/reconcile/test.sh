@@ -125,7 +125,7 @@ check "exclude removed, branch list restored" '[ "$(rs alpha review-gate | jq -c
 echo "== 6. token problems never fail the run"
 fresh_state
 run false ""
-check "no secret: NEEDS-TOKEN, exit 0, gh never called" '[ "$RC" = 0 ] && has "::warning title=NEEDS-TOKEN::PERSONAL_ADMIN_TOKEN is not set." && [ ! -s "${WORK}/state.json.log" ]'
+check "no secret: NEEDS-TOKEN, exit 0, gh never called" '[ "$RC" = 0 ] && has "::warning title=NEEDS-TOKEN::ACCOUNT_ADMIN_TOKEN is not set." && [ ! -s "${WORK}/state.json.log" ]'
 set_state '.deny_list = 401'
 run false
 check "listing refused (401): NEEDS-TOKEN, exit 0, no writes" '[ "$RC" = 0 ] && has "NEEDS-TOKEN" && [ "$(writes)" = 0 ]'
