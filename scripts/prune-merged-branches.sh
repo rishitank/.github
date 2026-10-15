@@ -373,7 +373,7 @@ ensure_auto_delete() {
   # -F sends a JSON boolean, not the string "true".
   if ! api "${work}/patch.json" -X PATCH "repos/${repo}" -F delete_branch_on_merge=true; then
     if [ "${API_STATUS}" = 403 ]; then
-      echo "::warning title=prune-merged-branches::${repo}: auto-delete head branches is off and the token may not turn it on (PATCH 403); PRUNE_TOKEN needs Administration: Read and write"
+      echo "::warning title=prune-merged-branches::${repo}: auto-delete head branches is off and the token may not turn it on (PATCH 403); ACCOUNT_ADMIN_TOKEN needs Administration: Read and write"
       settings_record "${repo}" unknown "off; PATCH 403, token needs Administration: Read and write: ${API_ERROR}"
     else
       echo "::warning title=prune-merged-branches::${repo}: could not turn on auto-delete head branches: PATCH ${API_STATUS}: ${API_ERROR}"
@@ -641,7 +641,7 @@ jq -r '
      ""
    else "On in every scanned repository.", "" end),
   (if .counts.settings.unknown > 0 then
-     "Unknown means the setting, or a long-lived branch'"'"'s protection, could not be read, or the setting could not be changed for lack of permission. `PRUNE_TOKEN` needs **Administration: Read and write** to read branch protection and turn the setting on, and **Contents: Read and write** to read the setting.",
+     "Unknown means the setting, or a long-lived branch'"'"'s protection, could not be read, or the setting could not be changed for lack of permission. `ACCOUNT_ADMIN_TOKEN` needs **Administration: Read and write** to read branch protection and turn the setting on, and **Contents: Read and write** to read the setting.",
      ""
    else empty end),
   "<details><summary>Report only (\(.report_only | length))</summary>",
@@ -661,7 +661,7 @@ echo "report: ${report}"
 # Unknown settings warn, once here and per repository above, but never fail
 # the run: the branch sweep is still complete, and nothing was turned on.
 if [ "$(jq '.counts.settings.unknown' "${report}")" -gt 0 ]; then
-  echo "::warning title=prune-merged-branches::auto-delete head branches unknown on $(jq -r '.counts.settings.unknown' "${report}") repositories (the setting or a long-lived branch's protection could not be read, or the setting could not be changed); PRUNE_TOKEN needs Administration: Read and write to read branch protection and turn it on, and Contents: Read and write to read it"
+  echo "::warning title=prune-merged-branches::auto-delete head branches unknown on $(jq -r '.counts.settings.unknown' "${report}") repositories (the setting or a long-lived branch's protection could not be read, or the setting could not be changed); ACCOUNT_ADMIN_TOKEN needs Administration: Read and write to read branch protection and turn it on, and Contents: Read and write to read it"
 fi
 if [ "$(jq '.counts.repos_unreadable + .counts.failed + .counts.settings.failed' "${report}")" -gt 0 ]; then
   echo "::error title=prune-merged-branches::incomplete: $(jq -r '.counts.repos_unreadable' "${report}") repositories unreadable, $(jq -r '.counts.failed' "${report}") deletions failed, $(jq -r '.counts.settings.failed' "${report}") auto-delete settings failed to turn on"

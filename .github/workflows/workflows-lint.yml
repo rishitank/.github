@@ -14,8 +14,15 @@ on:
   workflow_call:
     inputs:
       runs-on:
+        description: >-
+          Runner label. Empty (the default) follows the calling repository's
+          CI_RUNNER variable, which moves CI onto a fallback runner when the
+          included Actions minutes run out, and means ubuntu-latest when that
+          variable is unset. A public repository ignores CI_RUNNER: its
+          minutes are free, and a fork's pull request must never reach a
+          self-hosted runner.
         type: string
-        default: ubuntu-latest
+        default: ""
       fallback-version:
         description: Used only if the GitHub API cannot be reached.
         type: string
@@ -34,12 +41,15 @@ permissions:
 jobs:
   actionlint:
     name: actionlint
-    runs-on: ${{ inputs.runs-on }}
+    runs-on: ${{ inputs.runs-on || (github.event.repository.private && vars.CI_RUNNER) || 'ubuntu-latest' }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v7.0.1
+      # Nothing here pushes or fetches, so the checkout keeps no token.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Resolve latest actionlint
         id: resolve
@@ -64,7 +74,7 @@ jobs:
 
       - name: Cache actionlint
         id: cache
-        uses: actions/cache@v6.1.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ github.workspace }}/.cache/actionlint
           key: ${{ runner.os }}-actionlint-${{ steps.resolve.outputs.version }}

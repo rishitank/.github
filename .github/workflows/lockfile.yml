@@ -40,8 +40,15 @@ on:
         type: string
         default: ""
       runs-on:
+        description: >-
+          Runner label. Empty (the default) follows the calling repository's
+          CI_RUNNER variable, which moves CI onto a fallback runner when the
+          included Actions minutes run out, and means ubuntu-latest when that
+          variable is unset. A public repository ignores CI_RUNNER: its
+          minutes are free, and a fork's pull request must never reach a
+          self-hosted runner.
         type: string
-        default: ubuntu-latest
+        default: ""
       verify:
         description: Command proving the regenerated lockfile actually installs and builds.
         type: string
@@ -56,7 +63,7 @@ permissions:
 jobs:
   lockfile:
     name: Regenerate lockfile
-    runs-on: ${{ inputs.runs-on }}
+    runs-on: ${{ inputs.runs-on || (github.event.repository.private && vars.CI_RUNNER) || 'ubuntu-latest' }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
     permissions:
       contents: read
@@ -67,13 +74,13 @@ jobs:
     steps:
       # No persisted token: the proof steps run dependencies' install scripts,
       # which must not find one in .git/config.
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       - name: Install pnpm
         if: inputs.package-manager == 'pnpm'
-        uses: pnpm/action-setup@v6.0.10
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
         with:
           version: ${{ inputs.pnpm-version }}
 
@@ -95,7 +102,7 @@ jobs:
           VERSION_FILE: ${{ inputs.node-version-file }}
           VERSION: ${{ inputs.node-version }}
 
-      - uses: actions/setup-node@v7.0.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: ${{ steps.node.outputs.file }}
           node-version: ${{ steps.node.outputs.version }}
@@ -177,7 +184,7 @@ jobs:
 
       - name: Upload the proven lockfile
         if: steps.changed.outputs.changed == 'true'
-        uses: actions/upload-artifact@v7.0.1
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: lockfile
           path: ${{ steps.lock.outputs.path }}
@@ -188,18 +195,18 @@ jobs:
     name: Commit lockfile
     needs: lockfile
     if: needs.lockfile.outputs.changed == 'true'
-    runs-on: ${{ inputs.runs-on }}
+    runs-on: ${{ inputs.runs-on || (github.event.repository.private && vars.CI_RUNNER) || 'ubuntu-latest' }}
     timeout-minutes: 10
     permissions:
       contents: write
     steps:
       # No persisted token either: only the Commit step below gets one.
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       - name: Download the proven lockfile
-        uses: actions/download-artifact@v8.0.2
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: lockfile
           path: ${{ runner.temp }}/lockfile
@@ -232,9 +239,8 @@ jobs:
           LOCKFILE: ${{ needs.lockfile.outputs.lockfile }}
           EXPECTED: ${{ needs.lockfile.outputs.sum }}
 
-      # The token reaches this step only, and only through the push URL, never
-      # through git config. The host comes from GITHUB_SERVER_URL, as the
-      # checkout's origin URL does.
+      # The token reaches this step only, and only as an environment-supplied
+      # git header on the one push: not in .git/config, not on the command line.
       - name: Commit
         run: |
           set -euo pipefail
@@ -245,7 +251,16 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git commit -m "chore: regenerate ${LOCKFILE}"
-          git push "https://x-access-token:${GH_TOKEN}@${GITHUB_SERVER_URL#https://}/${GITHUB_REPOSITORY}.git" "HEAD:refs/heads/${GITHUB_REF_NAME}"
+          # The same header actions/checkout would have persisted, given to
+          # this one push through the environment instead of .git/config or
+          # the command line. The server URL is the checkout's own, so the
+          # header matches whichever host origin points at.
+          auth=$(printf 'x-access-token:%s' "${GH_TOKEN}" | base64 | tr -d '\n')
+          echo "::add-mask::${auth}"
+          GIT_CONFIG_COUNT=1 \
+            GIT_CONFIG_KEY_0="http.${GITHUB_SERVER_URL}/.extraheader" \
+            GIT_CONFIG_VALUE_0="AUTHORIZATION: basic ${auth}" \
+            git push origin "HEAD:refs/heads/${GITHUB_REF_NAME}"
         env:
           LOCKFILE: ${{ needs.lockfile.outputs.lockfile }}
           GH_TOKEN: ${{ github.token }}
