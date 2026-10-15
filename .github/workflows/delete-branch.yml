@@ -11,7 +11,8 @@
 #     in which a new push could land and be lost;
 #   - not the default branch, not a long-lived name (the prune's keep pattern),
 #     not protected, and no open pull request uses it as its base here or as its
-#     head anywhere in the fork network (parent, source or a sibling fork).
+#     head anywhere in the fork network the token can read (parent, source or a
+#     public sibling fork; someone else's private fork is invisible to it).
 #
 # DRY RUN BY DEFAULT: `mode` defaults to dry-run, which makes every check and
 # reports. Only `mode: apply` deletes. The job summary prints the command that

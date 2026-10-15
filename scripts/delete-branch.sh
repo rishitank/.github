@@ -18,11 +18,12 @@
 #   4. GitHub does not report the branch as protected;
 #   5. no open pull request uses it as its head or as its base. The head check
 #      asks GraphQL for the open pull requests whose head is this ref, in any
-#      repository of the fork network (the parent, the source or a sibling
-#      fork), then also lists them over REST in this repository and in its
-#      parent and source. Pull requests into a branch can only live in the
-#      branch's own repository, so the base check asks only there. Any query
-#      that fails refuses the deletion.
+#      repository of the fork network the token can read (the parent, the
+#      source or a public sibling fork; someone else's private fork is
+#      invisible to it), then also lists them over REST in this repository and
+#      in its parent and source. Pull requests into a branch can only live in
+#      the branch's own repository, so the base check asks only there. Any
+#      query that fails refuses the deletion.
 # A branch that is already gone is reported and is not an error. The default
 # mode is dry-run: it makes every check and reports what it would delete.
 #
@@ -137,7 +138,8 @@ protected="$(jq -r 'if .protected == null then "" else (.protected | tostring) e
 [ "${protected}" = "false" ] || fail "${branch} in ${repo} is protected (protected=${protected:-unknown})"
 
 # Every open pull request whose head is this ref, whichever repository of the
-# fork network it was opened in. A sibling fork's /pulls is not listable here.
+# fork network it was opened in, as far as the token can see (someone else's
+# private fork is invisible). A sibling fork's /pulls is not listable here.
 # shellcheck disable=SC2016 # $owner, $name and $ref are GraphQL variables.
 gql='query($owner: String!, $name: String!, $ref: String!) {
   repository(owner: $owner, name: $name) {
@@ -145,8 +147,8 @@ gql='query($owner: String!, $name: String!, $ref: String!) {
   }
 }'
 open_any="$(gh api graphql -f query="${gql}" -f owner="${repo%%/*}" -f name="${repo#*/}" \
-  -f ref="refs/heads/${branch}" --jq '.data.repository.ref.associatedPullRequests.totalCount')" \
-  || fail "cannot ask GraphQL for open pull requests from ${branch}"
+  -f ref="refs/heads/${branch}" --jq '.data.repository.ref.associatedPullRequests.totalCount' 2>&1)" \
+  || fail "cannot ask GraphQL for open pull requests from ${branch}: $(clean "${open_any}")"
 [[ "${open_any}" =~ ^[0-9]+$ ]] || fail "GraphQL returned no pull request count for ${branch} (got '$(clean "${open_any}")')"
 [ "${open_any}" = "0" ] || fail "${open_any} open pull request(s) in the fork network use ${repo}:${branch} as their head (GraphQL)"
 open_head="$(gh api "repos/${repo}/pulls?state=open&per_page=1&head=$(urlencode "${owner}:${branch}")" --jq 'length')" \
