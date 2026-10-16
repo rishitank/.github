@@ -256,10 +256,15 @@ jobs:
       - name: Commit
         run: |
           set -euo pipefail
-          if [ "${GITHUB_REF_TYPE}" != "branch" ]; then
-            echo "::error title=Not a branch::Run this from a branch; ${GITHUB_REF} is a ${GITHUB_REF_TYPE}."
-            exit 1
-          fi
+          # The full ref, not GITHUB_REF_TYPE: that reads "branch" on
+          # pull_request runs too, whose ref is refs/pull/N/merge.
+          case "${GITHUB_REF}" in
+            refs/heads/*) ;;
+            *)
+              echo "::error title=Not a branch::Run this from a branch; ${GITHUB_REF} is not under refs/heads/."
+              exit 1
+              ;;
+          esac
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git commit -m "chore: regenerate ${LOCKFILE}"
@@ -272,7 +277,7 @@ jobs:
           GIT_CONFIG_COUNT=1 \
             GIT_CONFIG_KEY_0="http.${GITHUB_SERVER_URL}/.extraheader" \
             GIT_CONFIG_VALUE_0="AUTHORIZATION: basic ${auth}" \
-            git push origin "HEAD:refs/heads/${GITHUB_REF_NAME}"
+            git push origin "HEAD:${GITHUB_REF}"
         env:
           LOCKFILE: ${{ inputs.package-manager == 'pnpm' && 'pnpm-lock.yaml' || 'package-lock.json' }}
           GH_TOKEN: ${{ github.token }}
