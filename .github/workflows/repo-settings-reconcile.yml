@@ -11,7 +11,8 @@
 #   silently drops a setting the plan doesn't allow;
 # - each ruleset under `repo_rulesets:`, created if missing and updated if it
 #   differs, then read back. A repository ruleset with any other name is
-#   never touched.
+#   never touched, and neither is a ruleset on a repository its entry
+#   lists under `skip_repositories`.
 #
 # TOKEN. `ACCOUNT_ADMIN_TOKEN`: a fine-grained personal access token for
 # "All repositories" with Administration (read and write) and Contents
@@ -85,10 +86,12 @@ jobs:
           bad=$(echo "${RULESETS}" | jq -r 'to_entries[]
             | select((.value.enforcement | IN("active", "disabled", "when_published") | not)
                 or ((.value.branches // []) | length) == 0
-                or (.value.enforcement == "when_published" and ((.value.required_checks.checks // []) | length) != 1))
+                or (.value.enforcement == "when_published" and ((.value.required_checks.checks // []) | length) != 1)
+                or ((.value.skip_repositories // []) | (type != "array")
+                    or any(.[]; (type != "string") or (test("^[^/\\s]+/[^/\\s]+$") | not))))
             | .key')
           if [ -n "${bad}" ]; then
-            echo "::error::repo_rulesets entries need enforcement (active|disabled|when_published, the last with exactly one required check) and branches: ${bad//$'\n'/, }"
+            echo "::error::repo_rulesets entries need enforcement (active|disabled|when_published, the last with exactly one required check), branches, and skip_repositories (if any) as a list of owner/repo: ${bad//$'\n'/, }"
             exit 1
           fi
 
@@ -221,14 +224,17 @@ jobs:
           # branches) would block every merge if required. Prints yes, no, or
           # unknown when the files can't be read.
           publishes() {
-            local repo=$1 ref=$2 check=$3 files f body
-            if ! files=$(gh api "repos/${repo}/contents/.github/workflows?ref=${ref}" \
+            local repo=$1 ref=$2 check=$3 files f body q
+            # The branch goes in a query string, so encode it: `main+` would
+            # otherwise be read as "main " and the workflows not found.
+            q=$(jq -rn --arg r "${ref}" '$r | @uri')
+            if ! files=$(gh api "repos/${repo}/contents/.github/workflows?ref=${q}" \
                 --jq '.[] | select(.type == "file" and (.name | test("\\.ya?ml$"))) | .path' 2>&1); then
               if grep -q "HTTP 404" <<< "${files}"; then echo no; else echo unknown; fi
               return 0
             fi
             for f in ${files}; do
-              body=$(gh api "repos/${repo}/contents/${f}?ref=${ref}" --jq .content 2>/dev/null | base64 -d 2>/dev/null) || { echo unknown; return 0; }
+              body=$(gh api "repos/${repo}/contents/${f}?ref=${q}" --jq .content 2>/dev/null | base64 -d 2>/dev/null) || { echo unknown; return 0; }
               if CHECK="${check}" yq -e '[.jobs // {} | to_entries[] | select((.value.name // .key) == env(CHECK))] | length > 0' \
                   <<< "${body}" >/dev/null 2>&1 \
                 && yq -o=json '.' <<< "${body}" 2>/dev/null \
@@ -297,6 +303,13 @@ jobs:
             fi
             for rs in $(echo "${RULESETS}" | jq -r 'keys[]'); do
               pol=$(echo "${RULESETS}" | jq --arg k "${rs}" '.[$k]')
+              # A repository the policy skips for this ruleset is left alone:
+              # nothing created, updated or disabled there.
+              if echo "${pol}" | jq -e --arg r "${repo}" \
+                  'any((.skip_repositories // [])[] | ascii_downcase; . == ($r | ascii_downcase))' >/dev/null; then
+                echo "info      ${repo}: ${rs} skipped (skip_repositories), left as it is"
+                continue
+              fi
               enf=$(echo "${pol}" | jq -r .enforcement)
               if [ "${enf}" = when_published ]; then
                 check=$(echo "${pol}" | jq -r '.required_checks.checks[0].context')

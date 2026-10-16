@@ -11,6 +11,9 @@
 # write and silently drops it (auto-merge), or refuses it (rulesets). The
 # private repositories here are left exactly as they are.
 #
+# A repository a ruleset should not apply to goes in that ruleset's
+# `skip_repositories`. It is the only place a repository is ever named.
+#
 # WHY PER REPOSITORY. A personal account has no organisation rulesets, so the
 # same ruleset body is written into each repository. It is still one body,
 # kept here, never a per-repository list.
@@ -39,6 +42,9 @@ repo_rulesets:
   # - required_checks: `strict` and `checks`, each a check name plus the app
   #   slug that must post it.
   # - block_force_push / block_deletion.
+  # - skip_repositories: `owner/repo` names this ruleset leaves alone. On
+  #   them it is never created, updated or disabled; one already there stays
+  #   as it is, so removing it is a deliberate step by hand.
   #
   # A repository ruleset with any other name is never touched, so the
   # rulesets already on a repository (holocron's "Main Branch Protection",
@@ -55,6 +61,9 @@ repo_rulesets:
     # Renovate merges its own pull requests past the gate, because CodeRabbit
     # never reviews a bot's. Nobody else, admins included.
     bypass_apps: [renovate]
+    # The profile README is edited in the browser, straight onto the default
+    # branch, which this gate would refuse.
+    skip_repositories: [rishitank/rishitank]
     pull_request:
       # Never 0: the CodeRabbit check goes green even when a review is
       # skipped or rate-limited, so the approval is the only proof of review.

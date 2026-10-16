@@ -14,7 +14,7 @@ State shape:
   }}
 Every call is appended to $MOCK_STATE.log as "METHOD path".
 """
-import base64, json, os, subprocess, sys
+import base64, json, os, subprocess, sys, urllib.parse
 
 args = sys.argv[1:]
 assert args[0] == "api", args
@@ -101,6 +101,11 @@ if len(p) == 3:
 if p[3] == "contents":
     wf = r.get("workflows", {})
     if wf is None: err("Server Error (HTTP 500)")
+    # Decoded as a server decodes a query string (`+` is a space), so a ref
+    # sent unencoded names a branch that doesn't exist.
+    ref = dict(urllib.parse.parse_qsl(query)).get("ref")
+    if ref is not None and ref != r.get("default_branch", "main"):
+        err("No commit found for the ref (HTTP 404)")
     want = "/".join(p[4:])
     if want == ".github/workflows":
         if not wf: err("Not Found (HTTP 404)")

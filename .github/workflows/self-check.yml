@@ -122,3 +122,26 @@ jobs:
 
       - name: auto-merge-sweep
         run: bash tests/auto-merge-sweep/test.sh .
+
+  # The one check the `ci-gate` ruleset (settings.yml) requires here. It
+  # stands for every job in `needs`, so the ruleset names a single check and a
+  # new job is gated by adding it there, without touching the policy.
+  # `always()` so a failed or skipped job reports red rather than leaving the
+  # check missing.
+  ci-gate:
+    name: ci-gate
+    if: always()
+    needs: [actionlint, presets, tests]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Every job passed
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          set -euo pipefail
+          for r in ${RESULTS}; do
+            [ "${r}" = success ] || { echo "::error::a gated job ended '${r}' (${RESULTS})"; exit 1; }
+          done
+          echo "all passed: ${RESULTS}"

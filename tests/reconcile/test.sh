@@ -168,7 +168,12 @@ beta_wf $'on:\n  pull_request:\n    branches: [\'main\\+\']'
 run false
 check "branches main\\+ covers the default branch main+: active" '[ "$(rs beta ci-gate | jq -r .enforcement)" = active ]'
 set_state '.repos["rishitank/beta"].default_branch = "master"'
-jq --arg ci "${CI_WF}" '.repos["rishitank/beta"].workflows[".github/workflows/ci.yml"] = $ci' "${WORK}/state.json" > "${WORK}/t" && mv "${WORK}/t" "${WORK}/state.json"
+# This repository's own self-check.yml is what its ci-gate ruleset relies on.
+jq --rawfile wf "${SRC}/.github/workflows/self-check.yml" \
+  '.repos["rishitank/beta"].workflows = {".github/workflows/self-check.yml": $wf}' "${WORK}/state.json" > "${WORK}/t" && mv "${WORK}/t" "${WORK}/state.json"
+run false
+check "this repository's self-check.yml publishes ci-gate: active" '[ "$RC" = 0 ] && [ "$(rs beta ci-gate | jq -r .enforcement)" = active ]'
+jq --arg ci "${CI_WF}" '.repos["rishitank/beta"].workflows = {".github/workflows/ci.yml": $ci}' "${WORK}/state.json" > "${WORK}/t" && mv "${WORK}/t" "${WORK}/state.json"
 run false >/dev/null
 set_state '.repos["rishitank/beta"].workflows = null'
 before=$(rs beta ci-gate); : > "${WORK}/state.json.log"; run false
@@ -220,11 +225,21 @@ cp "${WORK}/settings.yml" "${WORK}/settings.yml.bak"
 for case in ".repo_rulesets.review-gate.enforcement = \"evaluate\"" \
             "del(.repo_rulesets.long-lived-branches.branches)" \
             ".repo_rulesets.ci-gate.required_checks.checks += [{\"context\": \"x\"}]" \
-            ".repo_rulesets.review-gate.bypass_apps = [\"no-such-app\"]"; do
+            ".repo_rulesets.review-gate.bypass_apps = [\"no-such-app\"]" \
+            ".repo_rulesets.review-gate.skip_repositories = \"rishitank/alpha\"" \
+            ".repo_rulesets.review-gate.skip_repositories = [\"alpha\"]"; do
   fresh_state; cp "${WORK}/settings.yml.bak" "${WORK}/settings.yml"; yq -i "${case}" "${WORK}/settings.yml"
   run false
   check "invalid (${case}): exit 1 before any write" '[ "$RC" = 1 ] && [ "$(writes)" = 0 ]'
 done
+
+echo "== 9. skip_repositories"
+fresh_state; cp "${WORK}/settings.yml.bak" "${WORK}/settings.yml"
+yq -i '.repo_rulesets.review-gate.skip_repositories += ["Rishitank/Alpha"]' "${WORK}/settings.yml"
+run false
+check "alpha skipped for review-gate (case-insensitive), said so, exit 0" '[ "$RC" = 0 ] && has "rishitank/alpha: review-gate skipped (skip_repositories), left as it is"'
+check "alpha's existing review-gate untouched, no second one" '! grep -q "rulesets/11" "${WORK}/state.json.log" && [ "$(st "[.repos[\"rishitank/alpha\"].rulesets[] | select(.name == \"review-gate\")] | length")" = 1 ] && [ "$(rs alpha review-gate | jq -c .bypass_actors)" = "[]" ]'
+check "alpha's other rulesets and beta's review-gate still reconciled" '[ "$(rs alpha ci-gate | jq -r .enforcement)" = active ] && [ "$(rs beta review-gate | jq -r .enforcement)" = active ]'
 mv "${WORK}/settings.yml.bak" "${WORK}/settings.yml"
 
 echo

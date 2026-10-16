@@ -106,8 +106,14 @@ The rulesets, one body each, written into every repository:
   publish that check** (a top-level job named `ci-gate` in a workflow on the
   default branch) and disabled everywhere else, re-checked every run. So a
   repository is never blocked on a check it doesn't run, and one that adds
-  the job is gated from the next run on. The job to copy is the one in
-  TanksterAI/.github's README, "The `ci-gate` contract".
+  the job is gated from the next run on. "Publish" means the workflow runs on
+  every pull request into the default branch: a `pull_request` or
+  `pull_request_target` trigger whose branch filters cover it, with no
+  `paths` filter and no `types` list that drops opened, synchronize or
+  reopened. The job to copy is the one in TanksterAI/.github's README, "The
+  `ci-gate` contract". This repository's own is the `ci-gate` job in
+  `self-check.yml`, which needs actionlint, Renovate presets and Scenario
+  tests.
 - **`long-lived-branches`**: `main`, `master`, `develop` and everything under
   `release/` can't be deleted. `delete_branch_on_merge` deletes a merged pull
   request's head branch, so without this a pull request from `develop` into
@@ -115,6 +121,11 @@ The rulesets, one body each, written into every repository:
 
 Any repository ruleset with another name (holocron's "Main Branch
 Protection", say) is never touched, and keeps applying alongside these.
+Nor is a ruleset on a repository its entry lists under `skip_repositories`.
+It is never created, updated or disabled there, and one already there is left
+for a person to remove. `review-gate` skips `rishitank/rishitank`, the
+profile README, which is edited in the browser straight onto its default
+branch.
 
 **Auto-merge arms only behind a gate.** For each of the owner's pull requests,
 `auto-merge-sweep.yml` reads the rules that actually apply to its base branch
@@ -142,8 +153,9 @@ after them, and the review gate still applies: it has no bypass for the owner.
 public repository (Settings > Applications > CodeRabbit > Repository access:
 All repositories). On a repository it can't see, `review-gate` waits for an
 approval and a check that never come. It also stops direct pushes to the
-default branch there, which matters for a repository you edit in the browser
-(this account's profile README, say).
+default branch there, which matters for any repository you edit in the
+browser. Add such a repository to `review-gate`'s `skip_repositories`, as the
+profile README already is.
 
 The scenario tests for both are in `tests/`, and run in `self-check.yml`:
 `bash tests/reconcile/test.sh .` and `bash tests/auto-merge-sweep/test.sh .`
