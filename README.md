@@ -156,8 +156,9 @@ All repositories). On a repository it can't see, `review-gate` waits for an
 approval and a check that never come. It also stops direct pushes to the
 default branch there, which matters for any repository you edit in the
 browser. Adding such a repository to `review-gate`'s `skip_repositories`
-lifts the approval, but not an active `ci-gate`: any required check refuses a
-direct push too.
+only stops the reconciler writing the gate there. A `review-gate` already on
+it stays, approval and all, until removed by hand, and an active `ci-gate`
+still refuses a direct push, as any required check does.
 
 The scenario tests for both are in `tests/`, and run in `self-check.yml`:
 `bash tests/reconcile/test.sh .` and `bash tests/auto-merge-sweep/test.sh .`
