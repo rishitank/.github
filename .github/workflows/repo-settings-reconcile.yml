@@ -170,9 +170,12 @@ jobs:
               and ($want.rules | all(rule_ok($have.rules // [])))'
           }
 
-          # Does a workflow on the default branch have a top-level job whose
-          # check is named $3 (the job's `name:`, or its id when unnamed)?
-          # Prints yes, no, or unknown when the files can't be read.
+          # Does a workflow on the default branch that runs on pull requests
+          # have a top-level job whose check is named $3 (the job's `name:`,
+          # or its id when unnamed)? A job in a push- or schedule-only
+          # workflow never reports on a pull request, so requiring it would
+          # block every merge. Prints yes, no, or unknown when the files
+          # can't be read.
           publishes() {
             local repo=$1 ref=$2 check=$3 files f body
             if ! files=$(gh api "repos/${repo}/contents/.github/workflows?ref=${ref}" \
@@ -182,7 +185,14 @@ jobs:
             fi
             for f in ${files}; do
               body=$(gh api "repos/${repo}/contents/${f}?ref=${ref}" --jq .content 2>/dev/null | base64 -d 2>/dev/null) || { echo unknown; return 0; }
-              if CHECK="${check}" yq -e '[.jobs // {} | to_entries[] | select((.value.name // .key) == env(CHECK))] | length > 0' \
+              # `on:` may be a string, a list or a map; collect its event names.
+              # shellcheck disable=SC2016 # $ev is a yq variable, not shell
+              if CHECK="${check}" yq -e '
+                  [(.on | select(tag == "!!map") | keys | .[]),
+                   (.on | select(tag == "!!seq") | .[]),
+                   (.on | select(tag == "!!str"))] as $ev
+                  | ([$ev[] | select(. == "pull_request" or . == "pull_request_target")] | length > 0)
+                    and ([.jobs // {} | to_entries[] | select((.value.name // .key) == env(CHECK))] | length > 0)' \
                   <<< "${body}" >/dev/null 2>&1; then
                 echo yes; return 0
               fi

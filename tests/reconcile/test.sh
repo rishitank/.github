@@ -18,7 +18,8 @@ pass=0; fail=0
 check() { if eval "$2"; then echo "  PASS  $1"; pass=$((pass + 1)); else echo "  FAIL  $1"; fail=$((fail + 1)); fi; }
 
 OK='{"allow_auto_merge": true, "allow_squash_merge": true, "delete_branch_on_merge": true}'
-CI_WF='jobs:
+CI_WF='on: [push, pull_request]
+jobs:
   test:
     runs-on: ubuntu-latest
     steps: [{run: "true"}]
@@ -27,7 +28,8 @@ CI_WF='jobs:
     needs: [test]
     runs-on: ubuntu-latest
     steps: [{run: "true"}]'
-PLAIN_WF='jobs:
+PLAIN_WF='on: pull_request
+jobs:
   test:
     runs-on: ubuntu-latest
     steps: [{run: "true"}]'
@@ -108,6 +110,26 @@ check "alpha stops publishing: ci-gate disabled, never blocking" '[ "$(rs alpha 
 set_state '.repos["rishitank/beta"].workflows = {}'
 run false
 check "no workflows at all: disabled" '[ "$(rs beta ci-gate | jq -r .enforcement)" = disabled ]'
+# The job only counts in a workflow that runs on pull requests: a required
+# check that never reports on a pull request would block every merge.
+# beta_wf <on: block>: beta's only workflow is CI_WF's jobs under that trigger.
+beta_wf() {
+  local wf="$1"$'\n'"${CI_WF#*$'\n'}"
+  CHECK=ci-gate yq -e '.jobs["ci-gate"]' <<< "${wf}" >/dev/null || { echo "  BAD FIXTURE: $1"; fail=$((fail + 1)); }
+  jq --arg wf "${wf}" '.repos["rishitank/beta"].workflows = {".github/workflows/ci.yml": $wf}' "${WORK}/state.json" > "${WORK}/t" && mv "${WORK}/t" "${WORK}/state.json"
+}
+beta_wf $'on:\n  pull_request:\n    branches: [master]'
+run false
+check "on: {pull_request: ...} (map): active" '[ "$RC" = 0 ] && [ "$(rs beta ci-gate | jq -r .enforcement)" = active ]'
+beta_wf $'on:\n  push:\n  schedule: [{cron: "0 0 * * *"}]'
+run false
+check "ci-gate job in a push/schedule-only workflow: disabled" '[ "$RC" = 0 ] && [ "$(rs beta ci-gate | jq -r .enforcement)" = disabled ]'
+beta_wf 'on: pull_request_target'
+run false
+check "on: pull_request_target (scalar): active" '[ "$(rs beta ci-gate | jq -r .enforcement)" = active ]'
+beta_wf 'on: [push]'
+run false
+check "on: [push] (list without pull_request): disabled" '[ "$(rs beta ci-gate | jq -r .enforcement)" = disabled ]'
 jq --arg ci "${CI_WF}" '.repos["rishitank/beta"].workflows[".github/workflows/ci.yml"] = $ci' "${WORK}/state.json" > "${WORK}/t" && mv "${WORK}/t" "${WORK}/state.json"
 run false >/dev/null
 set_state '.repos["rishitank/beta"].workflows = null'
