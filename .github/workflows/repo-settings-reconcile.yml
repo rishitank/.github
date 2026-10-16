@@ -174,9 +174,11 @@ jobs:
           # request into branch $b? Only pull_request and pull_request_target
           # count, and only if nothing filters some pull requests out:
           # - `branches`/`branches-ignore` use GitHub's filter patterns: `**`
-          #   any characters, `*` any but `/`, and `?`, `+` and `[...]` as in
-          #   a regular expression. In `branches` the last matching pattern
-          #   wins, so a later pattern can re-include what a `!` excluded.
+          #   any characters, `*` any but `/`, `?`, `+` and `[...]` as in a
+          #   regular expression, and `\` makes the next character literal
+          #   (`main\+` is the branch `main+`). In `branches` the last matching
+          #   pattern wins, so a later pattern can re-include what a `!`
+          #   excluded.
           # - `types` must keep opened, synchronize and reopened (the
           #   default); fewer, and some pull requests never run the check.
           # - `paths`/`paths-ignore` always skip some pull requests.
@@ -185,9 +187,10 @@ jobs:
           # expression fails the whole check), so ci-gate is left disabled
           # rather than blocking merges on a check that never reports.
           PR_REACHES=$(cat <<'JQ'
-          def glob_re: "^" + (gsub("(?<c>[.^$(){}|\\\\])"; "\\\(.c)")
-                              | gsub("\\*\\*"; "\u0001") | gsub("\\*"; "[^/]*")
-                              | gsub("\u0001"; ".*")) + "$";
+          def glob_re: "^" + ([scan("\\\\.|\\*\\*|.")] | map(
+                                if . == "**" then ".*" elif . == "*" then "[^/]*"
+                                elif length == 2 then .[1:] | gsub("(?<c>[.^$(){}|?*+\\[\\]\\\\])"; "\\\(.c)")
+                                else gsub("(?<c>[.^$(){}|\\\\])"; "\\\(.c)") end) | join("")) + "$";
           def list: if . == null then [] elif type == "array" then . else [.] end;
           def hits($b): . as $p | $b | test($p | glob_re);
           def included($b):

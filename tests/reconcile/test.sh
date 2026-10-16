@@ -159,6 +159,15 @@ check "types without synchronize/reopened: disabled" '[ "$(rs beta ci-gate | jq 
 beta_wf $'on:\n  pull_request:\n    types: [opened, synchronize, reopened, labeled]'
 run false
 check "types keeping opened, synchronize and reopened: active" '[ "$(rs beta ci-gate | jq -r .enforcement)" = active ]'
+# `\` escapes a filter character: `main\+` is the branch main+, not "mai" then one or more n.
+set_state '.repos["rishitank/beta"].default_branch = "main+"'
+beta_wf $'on:\n  pull_request:\n    branches-ignore: [\'main\\+\']'
+run false
+check "branches-ignore main\\+ ignores the default branch main+: disabled" '[ "$RC" = 0 ] && [ "$(rs beta ci-gate | jq -r .enforcement)" = disabled ]'
+beta_wf $'on:\n  pull_request:\n    branches: [\'main\\+\']'
+run false
+check "branches main\\+ covers the default branch main+: active" '[ "$(rs beta ci-gate | jq -r .enforcement)" = active ]'
+set_state '.repos["rishitank/beta"].default_branch = "master"'
 jq --arg ci "${CI_WF}" '.repos["rishitank/beta"].workflows[".github/workflows/ci.yml"] = $ci' "${WORK}/state.json" > "${WORK}/t" && mv "${WORK}/t" "${WORK}/state.json"
 run false >/dev/null
 set_state '.repos["rishitank/beta"].workflows = null'
