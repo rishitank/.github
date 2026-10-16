@@ -61,9 +61,10 @@ repo_rulesets:
     # Renovate merges its own pull requests past the gate, because CodeRabbit
     # never reviews a bot's. Nobody else, admins included.
     bypass_apps: [renovate]
-    # The profile README is edited in the browser, straight onto the default
-    # branch, which this gate would refuse.
-    skip_repositories: [rishitank/rishitank]
+    # Nothing is skipped. The profile repository (rishitank/rishitank) is
+    # gated like the rest: its open-source-discover workflow arms auto-merge
+    # only where main requires an approval and ci-gate, i.e. behind this.
+    skip_repositories: []
     pull_request:
       # Never 0: the CodeRabbit check goes green even when a review is
       # skipped or rate-limited, so the approval is the only proof of review.

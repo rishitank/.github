@@ -123,9 +123,10 @@ Any repository ruleset with another name (holocron's "Main Branch
 Protection", say) is never touched, and keeps applying alongside these.
 Nor is a ruleset on a repository its entry lists under `skip_repositories`.
 It is never created, updated or disabled there, and one already there is left
-for a person to remove. `review-gate` skips `rishitank/rishitank`, the
-profile README, which is edited in the browser straight onto its default
-branch.
+for a person to remove. Nothing is skipped today: the profile repository
+(`rishitank/rishitank`) publishes `ci-gate` and its weekly open-source
+workflow arms auto-merge only behind `review-gate`, so it is gated like the
+rest.
 
 **Auto-merge arms only behind a gate.** For each of the owner's pull requests,
 `auto-merge-sweep.yml` reads the rules that actually apply to its base branch
@@ -154,8 +155,9 @@ public repository (Settings > Applications > CodeRabbit > Repository access:
 All repositories). On a repository it can't see, `review-gate` waits for an
 approval and a check that never come. It also stops direct pushes to the
 default branch there, which matters for any repository you edit in the
-browser. Add such a repository to `review-gate`'s `skip_repositories`, as the
-profile README already is.
+browser. Adding such a repository to `review-gate`'s `skip_repositories`
+lifts the approval, but not an active `ci-gate`: any required check refuses a
+direct push too.
 
 The scenario tests for both are in `tests/`, and run in `self-check.yml`:
 `bash tests/reconcile/test.sh .` and `bash tests/auto-merge-sweep/test.sh .`
