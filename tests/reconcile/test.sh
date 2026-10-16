@@ -130,6 +130,23 @@ check "on: pull_request_target (scalar): active" '[ "$(rs beta ci-gate | jq -r .
 beta_wf 'on: [push]'
 run false
 check "on: [push] (list without pull_request): disabled" '[ "$(rs beta ci-gate | jq -r .enforcement)" = disabled ]'
+# ...and only when its branch filters let it run on pull requests into the
+# default branch (beta's is master).
+beta_wf $'on:\n  pull_request:\n    branches: [main, develop]'
+run false
+check "pull_request filtered to other branches: disabled" '[ "$RC" = 0 ] && [ "$(rs beta ci-gate | jq -r .enforcement)" = disabled ]'
+beta_wf $'on:\n  pull_request:\n    branches-ignore: [master]'
+run false
+check "pull_request with the default branch ignored: disabled" '[ "$(rs beta ci-gate | jq -r .enforcement)" = disabled ]'
+beta_wf $'on:\n  pull_request:\n    branches: ["**", "!master"]'
+run false
+check "pull_request with the default branch negated: disabled" '[ "$(rs beta ci-gate | jq -r .enforcement)" = disabled ]'
+beta_wf $'on:\n  pull_request:\n    branches: ["ma*"]'
+run false
+check "pull_request with a glob covering the default branch: active" '[ "$(rs beta ci-gate | jq -r .enforcement)" = active ]'
+beta_wf $'on:\n  pull_request:\n    paths: ["src/**"]'
+run false
+check "pull_request with a paths filter (skips some PRs): disabled" '[ "$(rs beta ci-gate | jq -r .enforcement)" = disabled ]'
 jq --arg ci "${CI_WF}" '.repos["rishitank/beta"].workflows[".github/workflows/ci.yml"] = $ci' "${WORK}/state.json" > "${WORK}/t" && mv "${WORK}/t" "${WORK}/state.json"
 run false >/dev/null
 set_state '.repos["rishitank/beta"].workflows = null'

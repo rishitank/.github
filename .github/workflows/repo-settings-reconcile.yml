@@ -170,12 +170,46 @@ jobs:
               and ($want.rules | all(rule_ok($have.rules // [])))'
           }
 
+          # jq, over a workflow converted to JSON: does it run on every pull
+          # request into branch $b? Only pull_request and pull_request_target
+          # count; their `branches`/`branches-ignore` filters are GitHub globs
+          # (`**` any characters, `*` any but `/`, `?` one; `!` excludes). A
+          # `paths`/`paths-ignore` filter skips some pull requests, whose
+          # required check then never reports. A filter that cannot be shown
+          # to cover every pull request into $b counts as not covering it, so
+          # ci-gate is left disabled rather than blocking merges.
+          PR_REACHES=$(cat <<'JQ'
+          def glob_re: "^" + (gsub("(?<c>[.+^$(){}|\\[\\]\\\\])"; "\\\(.c)")
+                              | gsub("\\*\\*"; "\u0001") | gsub("\\*"; "[^/]*")
+                              | gsub("\u0001"; ".*") | gsub("\\?"; ".")) + "$";
+          def list: if . == null then [] elif type == "array" then . else [.] end;
+          def hits($b): . as $p | $b | test($p | glob_re);
+          def allows($b):
+            if type != "object" then true
+            elif has("paths") or has("paths-ignore") then false
+            else (if has("branches") then
+                    (.branches | list) as $l
+                    | ($l | map(select(startswith("!") | not)) | any(hits($b)))
+                      and ($l | map(select(startswith("!")) | ltrimstr("!")) | any(hits($b)) | not)
+                  else true end)
+                 and (if has("branches-ignore") then (.["branches-ignore"] | list | any(hits($b)) | not) else true end)
+            end;
+          (.on // null) as $on
+          | [ if ($on | type) == "string" then {e: $on, f: null}
+              elif ($on | type) == "array" then $on[] | {e: ., f: null}
+              elif ($on | type) == "object" then $on | to_entries[] | {e: .key, f: .value}
+              else empty end ]
+          | map(select(.e == "pull_request" or .e == "pull_request_target"))
+          | any(.f | allows($b))
+          JQ
+          )
+
           # Does a workflow on the default branch that runs on pull requests
-          # have a top-level job whose check is named $3 (the job's `name:`,
-          # or its id when unnamed)? A job in a push- or schedule-only
-          # workflow never reports on a pull request, so requiring it would
-          # block every merge. Prints yes, no, or unknown when the files
-          # can't be read.
+          # into that branch have a top-level job whose check is named $3 (the
+          # job's `name:`, or its id when unnamed)? A job that never reports on
+          # those pull requests (push- or schedule-only, or filtered to other
+          # branches) would block every merge if required. Prints yes, no, or
+          # unknown when the files can't be read.
           publishes() {
             local repo=$1 ref=$2 check=$3 files f body
             if ! files=$(gh api "repos/${repo}/contents/.github/workflows?ref=${ref}" \
@@ -185,15 +219,10 @@ jobs:
             fi
             for f in ${files}; do
               body=$(gh api "repos/${repo}/contents/${f}?ref=${ref}" --jq .content 2>/dev/null | base64 -d 2>/dev/null) || { echo unknown; return 0; }
-              # `on:` may be a string, a list or a map; collect its event names.
-              # shellcheck disable=SC2016 # $ev is a yq variable, not shell
-              if CHECK="${check}" yq -e '
-                  [(.on | select(tag == "!!map") | keys | .[]),
-                   (.on | select(tag == "!!seq") | .[]),
-                   (.on | select(tag == "!!str"))] as $ev
-                  | ([$ev[] | select(. == "pull_request" or . == "pull_request_target")] | length > 0)
-                    and ([.jobs // {} | to_entries[] | select((.value.name // .key) == env(CHECK))] | length > 0)' \
-                  <<< "${body}" >/dev/null 2>&1; then
+              if CHECK="${check}" yq -e '[.jobs // {} | to_entries[] | select((.value.name // .key) == env(CHECK))] | length > 0' \
+                  <<< "${body}" >/dev/null 2>&1 \
+                && yq -o=json '.' <<< "${body}" 2>/dev/null \
+                  | jq -e --arg b "${ref}" "${PR_REACHES}" >/dev/null 2>&1; then
                 echo yes; return 0
               fi
             done
