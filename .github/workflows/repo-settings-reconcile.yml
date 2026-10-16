@@ -172,26 +172,33 @@ jobs:
 
           # jq, over a workflow converted to JSON: does it run on every pull
           # request into branch $b? Only pull_request and pull_request_target
-          # count; their `branches`/`branches-ignore` filters are GitHub globs
-          # (`**` any characters, `*` any but `/`, `?` one; `!` excludes). A
-          # `paths`/`paths-ignore` filter skips some pull requests, whose
-          # required check then never reports. A filter that cannot be shown
-          # to cover every pull request into $b counts as not covering it, so
-          # ci-gate is left disabled rather than blocking merges.
+          # count, and only if nothing filters some pull requests out:
+          # - `branches`/`branches-ignore` use GitHub's filter patterns: `**`
+          #   any characters, `*` any but `/`, and `?`, `+` and `[...]` as in
+          #   a regular expression. In `branches` the last matching pattern
+          #   wins, so a later pattern can re-include what a `!` excluded.
+          # - `types` must keep opened, synchronize and reopened (the
+          #   default); fewer, and some pull requests never run the check.
+          # - `paths`/`paths-ignore` always skip some pull requests.
+          # A filter that cannot be shown to cover every pull request into $b
+          # counts as not covering it (a pattern that is not a valid regular
+          # expression fails the whole check), so ci-gate is left disabled
+          # rather than blocking merges on a check that never reports.
           PR_REACHES=$(cat <<'JQ'
-          def glob_re: "^" + (gsub("(?<c>[.+^$(){}|\\[\\]\\\\])"; "\\\(.c)")
+          def glob_re: "^" + (gsub("(?<c>[.^$(){}|\\\\])"; "\\\(.c)")
                               | gsub("\\*\\*"; "\u0001") | gsub("\\*"; "[^/]*")
-                              | gsub("\u0001"; ".*") | gsub("\\?"; ".")) + "$";
+                              | gsub("\u0001"; ".*")) + "$";
           def list: if . == null then [] elif type == "array" then . else [.] end;
           def hits($b): . as $p | $b | test($p | glob_re);
+          def included($b):
+            reduce .[] as $p (false;
+              if ($p | startswith("!")) then (if ($p | ltrimstr("!") | hits($b)) then false else . end)
+              else (if ($p | hits($b)) then true else . end) end);
           def allows($b):
             if type != "object" then true
             elif has("paths") or has("paths-ignore") then false
-            else (if has("branches") then
-                    (.branches | list) as $l
-                    | ($l | map(select(startswith("!") | not)) | any(hits($b)))
-                      and ($l | map(select(startswith("!")) | ltrimstr("!")) | any(hits($b)) | not)
-                  else true end)
+            elif has("types") and ((["opened", "synchronize", "reopened"] - (.types | list)) | length > 0) then false
+            else (if has("branches") then (.branches | list | included($b)) else true end)
                  and (if has("branches-ignore") then (.["branches-ignore"] | list | any(hits($b)) | not) else true end)
             end;
           (.on // null) as $on

@@ -147,6 +147,18 @@ check "pull_request with a glob covering the default branch: active" '[ "$(rs be
 beta_wf $'on:\n  pull_request:\n    paths: ["src/**"]'
 run false
 check "pull_request with a paths filter (skips some PRs): disabled" '[ "$(rs beta ci-gate | jq -r .enforcement)" = disabled ]'
+beta_wf $'on:\n  pull_request:\n    branches: ["**", "!ma*", "master"]'
+run false
+check "a later pattern re-includes the default branch after a !: active" '[ "$(rs beta ci-gate | jq -r .enforcement)" = active ]'
+beta_wf $'on:\n  pull_request:\n    branches: ["mast?er"]'
+run false
+check "? is zero-or-one of the previous character (mast?er covers master): active" '[ "$(rs beta ci-gate | jq -r .enforcement)" = active ]'
+beta_wf $'on:\n  pull_request:\n    types: [opened, labeled]'
+run false
+check "types without synchronize/reopened: disabled" '[ "$(rs beta ci-gate | jq -r .enforcement)" = disabled ]'
+beta_wf $'on:\n  pull_request:\n    types: [opened, synchronize, reopened, labeled]'
+run false
+check "types keeping opened, synchronize and reopened: active" '[ "$(rs beta ci-gate | jq -r .enforcement)" = active ]'
 jq --arg ci "${CI_WF}" '.repos["rishitank/beta"].workflows[".github/workflows/ci.yml"] = $ci' "${WORK}/state.json" > "${WORK}/t" && mv "${WORK}/t" "${WORK}/state.json"
 run false >/dev/null
 set_state '.repos["rishitank/beta"].workflows = null'
