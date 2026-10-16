@@ -216,6 +216,12 @@ inputs.runs-on || (github.event.repository.private && vars.CI_RUNNER) || 'ubuntu
 A caller's own jobs (ones that do not call a workflow here) should use the
 same expression.
 
+One exception: `lockfile.yml`'s `commit` job, which holds the write token,
+drops `inputs.runs-on` and uses `(github.event.repository.private &&
+vars.CI_RUNNER) || 'ubuntu-latest'`. A caller's override then cannot put it on
+the same persistent machine as the job that ran dependency code. That
+isolation also assumes `CI_RUNNER` gives each job a fresh machine.
+
 ## Changing a workflow
 
 A change here lands on every consuming repo at once. Treat it accordingly:
