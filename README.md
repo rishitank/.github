@@ -110,10 +110,9 @@ The rulesets, one body each, written into every repository:
   every pull request into the default branch: a `pull_request` or
   `pull_request_target` trigger whose branch filters cover it, with no
   `paths` filter and no `types` list that drops opened, synchronize or
-  reopened. The job to copy is the one in TanksterAI/.github's README, "The
-  `ci-gate` contract". This repository's own is the `ci-gate` job in
-  `self-check.yml`, which needs actionlint, Renovate presets and Scenario
-  tests.
+  reopened. The job to copy is under "The `ci-gate` contract" below. This
+  repository's own is the `ci-gate` job in `self-check.yml`, which needs
+  actionlint, Renovate presets and Scenario tests.
 - **`long-lived-branches`**: `main`, `master`, `develop` and everything under
   `release/` can't be deleted. `delete_branch_on_merge` deletes a merged pull
   request's head branch, so without this a pull request from `develop` into
@@ -127,6 +126,49 @@ for a person to remove. Nothing is skipped today: the profile repository
 (`rishitank/rishitank`) publishes `ci-gate` and its weekly open-source
 workflow arms auto-merge only behind `review-gate`, so it is gated like the
 rest.
+
+### The `ci-gate` contract
+
+A repository opts into the `ci-gate` ruleset by adding one job to a workflow
+that runs on its pull requests. It needs no entry in `settings.yml`: the next
+reconcile run sees the job and turns the ruleset on.
+
+```yaml
+  ci-gate:
+    if: always()
+    needs: [lint, test] # every job that must pass before a merge
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Every job passed
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          set -euo pipefail
+          for r in ${RESULTS}; do
+            [ "${r}" = success ] || { echo "::error::a gated job ended '${r}' (${RESULTS})"; exit 1; }
+          done
+```
+
+Each line is there for a reason:
+
+- **The check is named `ci-gate`**: the job's `name:`, or its id when it has
+  none. It must be a top-level job, not one inside a reusable workflow,
+  whose checks are named `<caller job> / <job>`.
+- **`if: always()`**: when a job it needs fails, a job without it is skipped,
+  and GitHub counts a skipped job as a passing required check. With it, the
+  gate runs and fails.
+- **Anything but `success` fails**, `skipped` and `cancelled` included. So a
+  job that may legitimately skip itself (a docs-only shortcut, say) does not
+  belong in `needs`.
+- **The workflow runs on every pull request into the default branch.** A
+  workflow skipped by a `paths` or branch filter never reports, and the
+  pull request waits on the check forever. The reconciler leaves `ci-gate`
+  disabled on a repository whose only `ci-gate` job is filtered like that
+  (see "Publish" above).
+- **Only the jobs in `needs` are gated.** A job left out can fail without
+  blocking a merge.
 
 **Auto-merge arms only behind a gate.** For each of the owner's pull requests,
 `auto-merge-sweep.yml` reads the rules that actually apply to its base branch
