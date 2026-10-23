@@ -53,7 +53,6 @@ needs to be insulated from that.
 | `security.yml` | any | osv-scanner + gitleaks in one job, both blocking; the advisory ecosystem audit runs weekly (every run if `audit-strict`) |
 | `lighthouse-ci.yml` | Node / web frontends | `lhci autorun` against a locally built app, plus a sticky PR comment with the score table; advisory by default |
 | `runtime-gate.yml` | web apps (any stack) | boots the app (Dockerfile, command or static), crawls it in a real browser and **fails on runtime errors**: exceptions, console errors, hydration errors, failed requests, 4xx/5xx, blank pages; plus advisory screenshot diffs and an advisory Gemini explorer that uses the app like a person. See `docs/runtime-gate.md` |
-| `lockfile.yml` | Node / TypeScript | `workflow_dispatch` lockfile regeneration that proves the result before committing; the proof runs read-only and a separate job commits, so dependency install scripts never share a job with the write token |
 | `workflows-lint.yml` | any | actionlint over `.github/workflows/`, self-updating and cached |
 
 Every job sets `timeout-minutes` and a least-privilege `permissions` block.
@@ -277,7 +276,8 @@ normally as two pull requests per repository: `non-major (automerge)`
 Renovate on green CI inside the window) and `non-major (review)` (everything
 else non-major, Docker digests included). The scientific stack keeps its own
 group. Majors, GitHub Actions majors included, open no pull request until they
-are ticked on the Dependency Dashboard. Lockfile maintenance is quarterly.
+are ticked on the Dependency Dashboard. Lockfile maintenance is quarterly; to
+run it sooner, tick it under "Awaiting Schedule" on the Dependency Dashboard.
 Branches are not updated or rebased outside the window, so a reviewed pull
 request merged later needs "Update branch" first. Security fixes are
 unaffected: `vulnerabilityAlerts` ignores the schedule and grouping and opens
@@ -342,12 +342,6 @@ inputs.runs-on || (github.event.repository.private && vars.CI_RUNNER) || 'ubuntu
 
 A caller's own jobs (ones that do not call a workflow here) should use the
 same expression.
-
-One exception: `lockfile.yml`'s `commit` job, which holds the write token,
-drops `inputs.runs-on` and uses `(github.event.repository.private &&
-vars.CI_RUNNER) || 'ubuntu-latest'`. A caller's override then cannot put it on
-the same persistent machine as the job that ran dependency code. That
-isolation also assumes `CI_RUNNER` gives each job a fresh machine.
 
 ## Changing a workflow
 

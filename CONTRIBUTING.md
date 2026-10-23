@@ -33,9 +33,12 @@ default branch are reserved for automation.
 
 ## Dependencies
 
-Renovate manages upgrades. Do not hand-edit a lockfile; if one needs
-regenerating, run the repo's `lockfile` workflow from the Actions tab so the
-result is proven to install and build before it is committed.
+Renovate manages upgrades. Do not hand-edit a lockfile. To regenerate one,
+tick lock file maintenance under "Awaiting Schedule" on the repo's Dependency
+Dashboard: Renovate opens a pull request (without running install scripts) and
+CI proves it installs and builds before it merges. A lockfile out of step with
+a `package.json` change on your own branch is fixed by running the package
+manager's install locally; CI's frozen install fails until it is.
 
 ## CI configuration
 
