@@ -760,16 +760,25 @@ jobs:
             const fs = require('fs');
             const read = (f) => (fs.existsSync(`${process.env.REPORT}/${f}`) ? fs.readFileSync(`${process.env.REPORT}/${f}`, 'utf8') : '');
             // No report artifact is not the same as no report: the upload is
-            // allowed to fail (storage quota), so say which, with the runtime
-            // job's own verdict.
+            // allowed to fail (storage quota), so say which is likelier, with
+            // the runtime job's own verdict.
+            const downloaded = process.env.DOWNLOAD === 'success';
             const passed = process.env.RUNTIME_RESULT === 'success';
-            const missing = process.env.DOWNLOAD === 'success'
-              ? `### ❌ Runtime crawl did not produce a report\n\nThe app may not have started. See the [run log](${process.env.RUN_URL}).`
-              : `### ${passed ? '✅ Runtime gate passed' : '❌ Runtime gate did not pass'}\n\nIts report artifact could not be downloaded (for example, the upload failed because the account's artifact storage is full), so the details are only in the [run log](${process.env.RUN_URL}).`;
+            let missing;
+            if (downloaded) {
+              missing = `### ❌ Runtime crawl did not produce a report\n\nThe app may not have started. See the [run log](${process.env.RUN_URL}).`;
+            } else if (passed) {
+              missing = `### ✅ Runtime gate passed\n\nIts report artifact could not be downloaded (most likely the upload failed, for example because the account's artifact storage is full), so the details are only in the [run log](${process.env.RUN_URL}).`;
+            } else {
+              missing = `### ❌ Runtime gate did not pass\n\nNo report artifact could be downloaded. Either the app never started (a failed build or start leaves nothing to upload) or the upload itself failed, for example because the account's artifact storage is full. See the [run log](${process.env.RUN_URL}).`;
+            }
             const crawl = read('crawl.md') || missing;
             const explore = read('explore.md') || `_AI explorer not run: ${process.env.EXPLORE_REASON}. Add the \`ai-explore\` label to request one._`;
             const marker = '<!-- runtime-gate-report -->';
-            let body = [marker, '## 🧪 Runtime gate', '', crawl, '', explore, '', `Screenshots, diffs and the app log: [runtime-gate artifact](${process.env.RUN_URL}).`].join('\n');
+            const footer = downloaded
+              ? `Screenshots, diffs and the app log: [runtime-gate artifact](${process.env.RUN_URL}).`
+              : `No runtime-gate artifact for this run; see the [run log](${process.env.RUN_URL}).`;
+            let body = [marker, '## 🧪 Runtime gate', '', crawl, '', explore, '', footer].join('\n');
             if (body.length > 60000) body = `${body.slice(0, 60000)}\n\n… truncated, full report in the artifact.`;
             const { data: comments } = await github.rest.issues.listComments({ owner: context.repo.owner, repo: context.repo.repo, issue_number: context.issue.number, per_page: 100 });
             const existing = comments.find((c) => c.body && c.body.includes(marker));

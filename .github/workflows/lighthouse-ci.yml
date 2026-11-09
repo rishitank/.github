@@ -232,12 +232,13 @@ jobs:
           include-hidden-files: true
 
       - name: Write a manifest for the comment
-        # lhci writes .lighthouseci/manifest.json only for upload.target
-        # filesystem. With temporary-public-storage, the usual target, there
-        # is none, so the comment had nothing to read and was never posted.
-        # Dumping the runs autorun collected with the filesystem target gives
-        # the comment the same manifest either way. It needs no network, and
-        # it writes outside .lighthouseci so the artifact above is unchanged.
+        # lhci writes a manifest.json only for the filesystem upload target,
+        # into that target's outputDir. With temporary-public-storage, the
+        # usual target, there is none, so the comment had nothing to read and
+        # was never posted. Dumping the runs autorun collected with the
+        # filesystem target gives the comment a manifest either way. It needs
+        # no network, and it writes outside .lighthouseci so the artifact
+        # above is unchanged.
         id: manifest
         if: >-
           always() && inputs.comment && steps.config.outputs.found == 'true' &&
@@ -308,9 +309,20 @@ jobs:
               if (run.isRepresentativeRun) byUrl.set(run.url, run);
             }
 
+            // The manifest is keyed by the URL that was requested, links.json
+            // by the URL the page ended on, so a redirect (a trailing slash,
+            // a locale) needs the run's finalUrl to find its report link.
+            const finalUrl = (run) => {
+              try {
+                return JSON.parse(fs.readFileSync(run.jsonPath, 'utf8')).finalUrl;
+              } catch {
+                return undefined;
+              }
+            };
+
             const rows = [...byUrl.values()].map((run) => {
               const s = run.summary || {};
-              const link = links[run.url];
+              const link = links[finalUrl(run)] ?? links[run.url];
               const urlCell = link ? `[${run.url}](${link})` : run.url;
               return `| ${urlCell} | ${grade(s.performance)} | ${grade(s.accessibility)} | ${grade(s['best-practices'])} | ${grade(s.seo)} |`;
             });
