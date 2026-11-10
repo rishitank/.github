@@ -32,7 +32,7 @@
 # Read-only). The workflow passes ACCOUNT_ADMIN_TOKEN.
 set -euo pipefail
 
-KEEP_RE='^(main|master|develop|staging|test|gh-pages|v[0-9][0-9.]*|deploy-.*|release/.*)$'
+KEEP_RE='^(main|master|develop|staging|test|gh-pages|v[0-9][0-9.]*|deploy-.*|release/.*|pins/.*)$'
 
 # fail MESSAGE: report a refused check in the log and the job summary, exit 1.
 fail() {
