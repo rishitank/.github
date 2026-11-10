@@ -950,20 +950,24 @@ export function renderMarkdown(r) {
   }
   if (r.baseline === 'compared') {
     // A screenshot that could not be compared is only a warning, so say here
-    // that the comparison is incomplete rather than report no changes.
-    const uncompared = r.findings.filter((f) => f.kind === 'visual-diff-failed').length;
+    // that the comparison is incomplete rather than report no changes, and
+    // name the screenshots: the warnings list below is capped and may not
+    // reach them.
+    const uncompared = r.findings.filter((f) => f.kind === 'visual-diff-failed');
     if (r.visual.length) {
       lines.push(`**Visual changes vs the default branch** (advisory, ${r.visual.length}):`);
       for (const v of r.visual.slice(0, 20)) {
         lines.push(`- \`${v.url || v.name}\`: ${(v.ratio * 100).toFixed(1)}% of pixels differ${v.resized ? `, size ${v.before.join('×')} → ${v.after.join('×')}` : ''}`);
       }
       lines.push('');
-    } else if (!uncompared) {
+    } else if (!uncompared.length) {
       lines.push('No visual changes against the last default-branch run.');
       lines.push('');
     }
-    if (uncompared) {
-      lines.push(`Visual comparison incomplete: ${uncompared} screenshot${uncompared === 1 ? '' : 's'} could not be compared (see the warnings).`);
+    if (uncompared.length) {
+      lines.push(`Visual comparison incomplete: ${uncompared.length} screenshot${uncompared.length === 1 ? '' : 's'} could not be compared:`);
+      for (const f of uncompared.slice(0, 20)) lines.push(`- ${mdEscape(f.message)}`);
+      if (uncompared.length > 20) lines.push(`- and ${uncompared.length - 20} more (see crawl.json)`);
       lines.push('');
     }
   }
