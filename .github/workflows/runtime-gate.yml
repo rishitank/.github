@@ -516,7 +516,7 @@ jobs:
       - name: Start app (static)
         if: inputs.mode == 'static'
         # pins/runtime-gate-v6 keeps this commit reachable (see the header comment).
-        uses: rishitank/.github/.github/actions/runtime-gate@d95c6c4882012b8a4eefa2d46895872f3caba3a2
+        uses: rishitank/.github/.github/actions/runtime-gate@549fc9ab2849029d91776d14460776adf12a6d0c
         with:
           mode: serve
           serve-dir: ${{ inputs.working-directory }}/${{ inputs.static-dir }}
@@ -589,7 +589,7 @@ jobs:
         id: crawl
         continue-on-error: true
         # pins/runtime-gate-v6 keeps this commit reachable (see the header comment).
-        uses: rishitank/.github/.github/actions/runtime-gate@d95c6c4882012b8a4eefa2d46895872f3caba3a2
+        uses: rishitank/.github/.github/actions/runtime-gate@549fc9ab2849029d91776d14460776adf12a6d0c
         with:
           mode: crawl
           url: ${{ env.RG_BASE }}
@@ -644,7 +644,7 @@ jobs:
         if: steps.plan.outputs.explore == 'true'
         continue-on-error: true
         # pins/runtime-gate-v6 keeps this commit reachable (see the header comment).
-        uses: rishitank/.github/.github/actions/runtime-gate@d95c6c4882012b8a4eefa2d46895872f3caba3a2
+        uses: rishitank/.github/.github/actions/runtime-gate@549fc9ab2849029d91776d14460776adf12a6d0c
         with:
           mode: explore
           url: ${{ env.RG_BASE }}
