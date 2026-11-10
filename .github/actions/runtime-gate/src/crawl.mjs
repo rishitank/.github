@@ -326,14 +326,33 @@ function baselineCoverage() {
   try { return JSON.parse(fs.readFileSync(f, 'utf8')).coverage || null; } catch { return null; }
 }
 
-// PNG.sync.read inflates through pngjs's own subclass of zlib.Inflate, which
-// calls the parent as a function (Inflate.call(this)). From Node 27 (seen on
-// 27.0.0-alpha) zlib's classes are real ES classes, so that throws "Class
-// constructor Inflate cannot be invoked without 'new'". The streaming parser
-// uses zlib.createInflate() and decodes the same pixels on every Node version.
+// PNG.sync.read inflates non-interlaced images through pngjs's own subclass
+// of zlib.Inflate, which calls the parent as a function
+// (Inflate.call(this)). From Node 27 (seen on 27.0.0-alpha) zlib's classes
+// are real ES classes, so that throws "Class constructor Inflate cannot be
+// invoked without 'new'". The streaming parser uses zlib.createInflate() and
+// decodes the same pixels on every Node version.
+//
+// One flaw of the streaming parser is handled here too. pngjs 7.0.0 (its
+// last release) emits a too-short image's "Unexpected end of input" from an
+// internal filter stream nobody listens to, so the error is uncaught and the
+// callback never runs. That stream exists by the time pngjs emits
+// "metadata", before any image data is inflated, so listening on it then
+// turns that case into a rejection like any other. The "a corrupt baseline
+// screenshot" test in test/upgrades.test.mjs pins this; recheck it if pngjs
+// is ever upgraded.
 function readPng(file) {
   return new Promise((resolve, reject) => {
-    new PNG().parse(fs.readFileSync(file), (err, png) => (err ? reject(err) : resolve(png)));
+    let settled = false;
+    const done = (err, png) => {
+      if (settled) return;
+      settled = true;
+      if (err) reject(err instanceof Error ? err : new Error(String(err)));
+      else resolve(png);
+    };
+    const png = new PNG();
+    png.once('metadata', () => png._parser?._filter?.on('error', (err) => done(err)));
+    png.parse(fs.readFileSync(file), done);
   });
 }
 
@@ -768,8 +787,19 @@ async function main() {
   }
   if (BASE_SCREENS) {
     for (const f of fs.readdirSync(SCREENS)) {
-      const d = await diff(f.replace(/\.png$/, ''));
-      if (d) visual.push({ ...d, url: urlByShot.get(d.name) || '' });
+      const name = f.replace(/\.png$/, '');
+      try {
+        const d = await diff(name);
+        if (d) visual.push({ ...d, url: urlByShot.get(d.name) || '' });
+      } catch (err) {
+        // Visual changes are advisory (see the top of this file), so a
+        // screenshot that cannot be compared is reported, never a reason to
+        // fail the crawl.
+        collector.add('visual-diff-failed', `could not compare ${f} with the baseline: ${err.message}`, {
+          page: `${BASE}${urlByShot.get(name) || '/'}`,
+          blocking: false,
+        });
+      }
     }
   }
 
