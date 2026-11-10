@@ -185,7 +185,9 @@ test('a visual change against the baseline is reported with a diff image; a corr
   }
   const md = fs.readFileSync(path.join(r.out, 'crawl.md'), 'utf8');
   assert.match(md, /Visual changes vs the default branch/);
-  assert.match(md, /Visual comparison incomplete: 2 screenshots could not be compared/);
+  const incomplete = md.split('Visual comparison incomplete: 2 screenshots could not be compared:')[1];
+  assert.ok(incomplete, md);
+  for (const f of [short, garbage]) assert.match(incomplete.split('\n\n')[0], new RegExp(`could not compare ${f.replace('.', '\\.')} with the baseline`));
 });
 
 test('a crash behind the login fails the run; quarantine makes it non-blocking', () => {

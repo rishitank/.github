@@ -17,7 +17,7 @@ cases to write or maintain.
 | Layer | Blocks merge? | What it catches |
 |---|---|---|
 | **Crawl** | **Yes** | See below. |
-| **Visual diff** | No (advisory) | Every screenshot is compared with the last successful run on the base branch. Changes over 0.2% of pixels are listed in the PR comment, with diff images in the artifact. A screenshot that can't be compared is listed as a warning, and the comment says the comparison is incomplete. |
+| **Visual diff** | No (advisory) | Every screenshot is compared with the last successful run on the base branch. Changes over 0.2% of pixels are listed in the PR comment, with diff images in the artifact. A screenshot pair that can't be compared (an unreadable image) is a warning, and the comment says the comparison is incomplete and names the screenshots. A page with no baseline screenshot yet is not compared. |
 | **AI explorer** | No (advisory) | See below. |
 
 **Crawl.** It finds pages from `/`, any `routes` you list, `sitemap.xml` and
