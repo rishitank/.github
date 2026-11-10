@@ -7,6 +7,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { PNG } from 'pngjs';
 import { rejectReason, toStep, fromStep } from '../src/actions.mjs';
 import { heuristicHits, chunks, createGuard } from '../src/injection.mjs';
 import { FlowRecorder, mergeFlows } from '../src/flows.mjs';
@@ -129,6 +130,64 @@ test('signs up, signs in and crawls behind the login; coverage is reported', () 
   assert.equal(again.report.baseline, 'compared');
   assert.ok(again.report.coverageDelta, 'coverage delta against the baseline');
   assert.equal(again.report.coverageDelta.routesVisited, 0, JSON.stringify(again.report.coverageDelta));
+});
+
+// A PNG whose header promises twice the rows its image data holds: a valid
+// zlib stream that inflates short. pngjs's streaming parser throws that as
+// an uncaught exception unless readPng listens for it.
+function shortPng() {
+  const table = Array.from({ length: 256 }, (_, n) => {
+    let c = n;
+    for (let k = 0; k < 8; k += 1) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    return c >>> 0;
+  });
+  const crc = (buf) => {
+    let c = 0xffffffff;
+    for (const b of buf) c = table[(c ^ b) & 0xff] ^ (c >>> 8);
+    return (c ^ 0xffffffff) >>> 0;
+  };
+  const img = new PNG({ width: 64, height: 32 });
+  img.data.fill(120);
+  const buf = Buffer.from(PNG.sync.write(img));
+  buf.writeUInt32BE(64, 20); // IHDR height
+  buf.writeUInt32BE(crc(buf.subarray(12, 29)), 29); // IHDR CRC
+  return buf;
+}
+
+test('a visual change against the baseline is reported with a diff image; a corrupt baseline screenshot is reported, not fatal', () => {
+  const quiet = { RG_INTERACT: 'false', RG_FORMS: 'false', RG_RETRY: 'false' };
+  const first = run('crawl.mjs', { RG_URL: GOOD, ...quiet });
+  assert.equal(first.status, 0, first.log);
+  const shots = fs.readdirSync(path.join(first.out, 'screens')).filter((f) => f.endsWith('.png')).sort();
+  assert.ok(shots.length >= 3, `need three screenshots to tamper with: ${shots.join(', ')}`);
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'rg-base-'));
+  fs.cpSync(first.out, base, { recursive: true });
+  const [changed, short, garbage] = shots;
+  // A real change: that page's baseline replaced by a solid fill of the same
+  // size, so nearly every pixel differs but nothing is resized.
+  const orig = fs.readFileSync(path.join(base, 'screens', changed));
+  const fill = new PNG({ width: orig.readUInt32BE(16), height: orig.readUInt32BE(20) });
+  for (let i = 0; i < fill.data.length; i += 4) fill.data.set([255, 0, 255, 255], i);
+  fs.writeFileSync(path.join(base, 'screens', changed), PNG.sync.write(fill));
+  fs.writeFileSync(path.join(base, 'screens', short), shortPng());
+  fs.writeFileSync(path.join(base, 'screens', garbage), 'not a png');
+
+  const r = run('crawl.mjs', { RG_URL: GOOD, ...quiet, RG_BASELINE_DIR: base });
+  assert.equal(r.status, 0, `visual problems are advisory: ${r.log}`);
+  assert.equal(r.report.baseline, 'compared');
+  const v = r.report.visual.find((x) => `${x.name}.png` === changed);
+  assert.ok(v && v.ratio > 0.5 && !v.resized, JSON.stringify(r.report.visual));
+  assert.ok(fs.existsSync(path.join(r.out, 'diffs', changed)), 'the diff image is written');
+  for (const f of [short, garbage]) {
+    const finding = r.report.findings.find((x) => x.kind === 'visual-diff-failed' && x.message.includes(f));
+    assert.ok(finding && !finding.blocking, `${f}: ${JSON.stringify(r.report.findings, null, 1)}`);
+    assert.match(finding.message, /the baseline copy is unreadable/);
+  }
+  const md = fs.readFileSync(path.join(r.out, 'crawl.md'), 'utf8');
+  assert.match(md, /Visual changes vs the default branch/);
+  const incomplete = md.split('Visual comparison incomplete: 2 screenshots could not be compared:')[1];
+  assert.ok(incomplete, md);
+  for (const f of [short, garbage]) assert.match(incomplete.split('\n\n')[0], new RegExp(`could not compare ${f.replace('.', '\\.')} with the baseline`));
 });
 
 test('a crash behind the login fails the run; quarantine makes it non-blocking', () => {

@@ -113,9 +113,11 @@ The rulesets, one body each, written into every repository:
   repository's own is the `ci-gate` job in `self-check.yml`, which needs
   actionlint, Renovate presets and Scenario tests.
 - **`long-lived-branches`**: `main`, `master`, `develop` and everything under
-  `release/` can't be deleted. `delete_branch_on_merge` deletes a merged pull
-  request's head branch, so without this a pull request from `develop` into
-  `main` would take `develop` with it.
+  `release/` or `pins/` can't be deleted. `delete_branch_on_merge` deletes a
+  merged pull request's head branch, so without this a pull request from
+  `develop` into `main` would take `develop` with it. A `pins/` branch keeps
+  reachable a commit that a workflow pins by SHA (the runtime-gate action),
+  which deleting the branch could leave to be garbage-collected.
 
 Any repository ruleset with another name (holocron's "Main Branch
 Protection", say) is never touched, and keeps applying alongside these.

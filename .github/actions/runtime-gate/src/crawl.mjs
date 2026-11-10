@@ -326,14 +326,34 @@ function baselineCoverage() {
   try { return JSON.parse(fs.readFileSync(f, 'utf8')).coverage || null; } catch { return null; }
 }
 
-// PNG.sync.read inflates through pngjs's own subclass of zlib.Inflate, which
-// calls the parent as a function (Inflate.call(this)). From Node 27 (seen on
-// 27.0.0-alpha) zlib's classes are real ES classes, so that throws "Class
-// constructor Inflate cannot be invoked without 'new'". The streaming parser
-// uses zlib.createInflate() and decodes the same pixels on every Node version.
+// PNG.sync.read inflates non-interlaced images through pngjs's own subclass
+// of zlib.Inflate, which calls the parent as a function
+// (Inflate.call(this)). From Node 27 (seen on 27.0.0-alpha) zlib's classes
+// are real ES classes, so that throws "Class constructor Inflate cannot be
+// invoked without 'new'". The streaming parser uses zlib.createInflate() and
+// decodes the same pixels on every Node version.
+//
+// One flaw of the streaming parser is handled here too. pngjs 7.0.0 (its
+// last release) emits some decode errors from an internal filter stream
+// nobody listens to: a too-short image's "Unexpected end of input", or an
+// unknown filter type in corrupt image data. The error is then uncaught and
+// the callback never runs. That stream exists by the time pngjs emits
+// "metadata", before any image data is inflated, so listening on it then
+// turns those cases into a rejection like any other. The "a corrupt baseline
+// screenshot" test in test/upgrades.test.mjs pins this; recheck it if pngjs
+// is ever upgraded.
 function readPng(file) {
   return new Promise((resolve, reject) => {
-    new PNG().parse(fs.readFileSync(file), (err, png) => (err ? reject(err) : resolve(png)));
+    let settled = false;
+    const done = (err, png) => {
+      if (settled) return;
+      settled = true;
+      if (err) reject(err instanceof Error ? err : new Error(String(err)));
+      else resolve(png);
+    };
+    const png = new PNG();
+    png.once('metadata', () => png._parser?._filter?.on('error', (err) => done(err)));
+    png.parse(fs.readFileSync(file), done);
   });
 }
 
@@ -342,8 +362,14 @@ async function diff(name) {
   const before = path.join(BASE_SCREENS, `${name}.png`);
   const after = path.join(SCREENS, `${name}.png`);
   if (!fs.existsSync(before) || !fs.existsSync(after)) return null;
-  const a = await readPng(before);
-  const b = await readPng(after);
+  // Say which side is bad: the baseline is an older run's artifact, while
+  // this run's screenshot would point at the crawl itself.
+  const read = (file, side) =>
+    readPng(file).catch((err) => {
+      throw new Error(`${side} is unreadable (${err.message})`);
+    });
+  const a = await read(before, 'the baseline copy');
+  const b = await read(after, "this run's copy");
   const width = Math.min(a.width, b.width);
   const height = Math.min(a.height, b.height);
   const crop = (img) => {
@@ -768,8 +794,19 @@ async function main() {
   }
   if (BASE_SCREENS) {
     for (const f of fs.readdirSync(SCREENS)) {
-      const d = await diff(f.replace(/\.png$/, ''));
-      if (d) visual.push({ ...d, url: urlByShot.get(d.name) || '' });
+      const name = f.replace(/\.png$/, '');
+      try {
+        const d = await diff(name);
+        if (d) visual.push({ ...d, url: urlByShot.get(d.name) || '' });
+      } catch (err) {
+        // Visual changes are advisory (see the top of this file), so a
+        // screenshot that cannot be compared is reported, never a reason to
+        // fail the crawl.
+        collector.add('visual-diff-failed', `could not compare ${f} with the baseline: ${err.message}`, {
+          page: `${BASE}${urlByShot.get(name) || '/'}`,
+          blocking: false,
+        });
+      }
     }
   }
 
@@ -912,14 +949,25 @@ export function renderMarkdown(r) {
     lines.push('');
   }
   if (r.baseline === 'compared') {
+    // A screenshot that could not be compared is only a warning, so say here
+    // that the comparison is incomplete rather than report no changes, and
+    // name the screenshots: the warnings list below is capped and may not
+    // reach them.
+    const uncompared = r.findings.filter((f) => f.kind === 'visual-diff-failed');
     if (r.visual.length) {
       lines.push(`**Visual changes vs the default branch** (advisory, ${r.visual.length}):`);
       for (const v of r.visual.slice(0, 20)) {
         lines.push(`- \`${v.url || v.name}\`: ${(v.ratio * 100).toFixed(1)}% of pixels differ${v.resized ? `, size ${v.before.join('×')} → ${v.after.join('×')}` : ''}`);
       }
       lines.push('');
-    } else {
+    } else if (!uncompared.length) {
       lines.push('No visual changes against the last default-branch run.');
+      lines.push('');
+    }
+    if (uncompared.length) {
+      lines.push(`Visual comparison incomplete: ${uncompared.length} screenshot${uncompared.length === 1 ? '' : 's'} could not be compared:`);
+      for (const f of uncompared.slice(0, 20)) lines.push(`- ${mdEscape(f.message)}`);
+      if (uncompared.length > 20) lines.push(`- and ${uncompared.length - 20} more (see crawl.json)`);
       lines.push('');
     }
   }

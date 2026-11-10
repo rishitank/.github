@@ -112,7 +112,8 @@ jobs:
       - name: Merge into the flows file
         id: merge
         if: steps.collect.outputs.files != ''
-        uses: rishitank/.github/.github/actions/runtime-gate@469ce6b10e6b7bd784f8f3a1baf49c7c512718a6
+        # Same commit as runtime-gate.yml; pins/runtime-gate-v6 keeps it reachable.
+        uses: rishitank/.github/.github/actions/runtime-gate@c75688c0f77a07bd82029f2d27dfd6685d0d4e84
         with:
           mode: merge-flows
           flows-new: ${{ steps.collect.outputs.files }}

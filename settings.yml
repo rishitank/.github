@@ -105,10 +105,16 @@ repo_rulesets:
     # a pull request from develop into main would take develop with it. These
     # names can't be deleted at all, by hand or by any tool.
     # `release/**/*` matches every branch under release/, at any depth.
+    # `pins/**/*` covers the branches that keep a pinned commit reachable:
+    # runtime-gate.yml and runtime-gate-flows.yml run
+    # .github/actions/runtime-gate at a commit SHA from a squash-merged pull
+    # request, and pins/runtime-gate-vN is all that stops that commit being
+    # garbage-collected, which would break every caller.
     enforcement: active
     branches:
       - refs/heads/main
       - refs/heads/master
       - refs/heads/develop
       - refs/heads/release/**/*
+      - refs/heads/pins/**/*
     block_deletion: true

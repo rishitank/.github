@@ -93,7 +93,7 @@ check "review-gate: CodeRabbit pinned to 347564, strict" '[ "$(rs alpha review-g
 check "unrelated ruleset untouched" '[ "$(st ".repos[\"rishitank/alpha\"].rulesets[\"12\"].name")" = "Main Branch Protection" ] && ! grep -q "rulesets/12" "${WORK}/state.json.log"'
 check "alpha ci-gate active, pinned to github-actions" '[ "$(rs alpha ci-gate | jq -c "[.enforcement, .rules[0].parameters.required_status_checks]")" = "[\"active\",[{\"context\":\"ci-gate\",\"integration_id\":15368}]]" ]'
 check "beta ci-gate written disabled" '[ "$(rs beta ci-gate | jq -r .enforcement)" = disabled ]'
-check "long-lived-branches: deletion only, 4 patterns, no bypass" '[ "$(rs beta long-lived-branches | jq -c "[[.rules[].type], (.conditions.ref_name.include | sort), .bypass_actors]")" = "[[\"deletion\"],[\"refs/heads/develop\",\"refs/heads/main\",\"refs/heads/master\",\"refs/heads/release/**/*\"],[]]" ]'
+check "long-lived-branches: deletion only, 5 patterns, no bypass" '[ "$(rs beta long-lived-branches | jq -c "[[.rules[].type], (.conditions.ref_name.include | sort), .bypass_actors]")" = "[[\"deletion\"],[\"refs/heads/develop\",\"refs/heads/main\",\"refs/heads/master\",\"refs/heads/pins/**/*\",\"refs/heads/release/**/*\"],[]]" ]'
 check "fork, archived, private and others untouched" '! touched rishitank/forked && ! touched rishitank/old && ! touched rishitank/secret && ! touched someone/else'
 check "reports 2 repositories" 'has "2 repositories"'
 
@@ -185,7 +185,7 @@ set_state '(.repos["rishitank/alpha"].rulesets["11"].conditions.ref_name.exclude
   | (.repos["rishitank/beta"].rulesets[] | select(.name == "long-lived-branches") | .conditions.ref_name.include) = ["refs/heads/main"]'
 : > "${WORK}/state.json.log"; run false
 check "exit 0, two PUTs" '[ "$RC" = 0 ] && [ "$(grep -c "^PUT " "${WORK}/state.json.log")" = 2 ]'
-check "exclude removed, branch list restored" '[ "$(rs alpha review-gate | jq -c .conditions.ref_name.exclude)" = "[]" ] && [ "$(rs beta long-lived-branches | jq ".conditions.ref_name.include | length")" = 4 ]'
+check "exclude removed, branch list restored" '[ "$(rs alpha review-gate | jq -c .conditions.ref_name.exclude)" = "[]" ] && [ "$(rs beta long-lived-branches | jq ".conditions.ref_name.include | length")" = 5 ]'
 
 echo "== 6. token problems never fail the run"
 fresh_state
