@@ -36,7 +36,10 @@
 #
 # The toolkit (crawler, explorer, static server) is the composite action at
 # .github/actions/runtime-gate in this repository. It is pinned by commit
-# below; move the pin and this file together.
+# below; move the pin and this file together. Each pinned commit is kept on a
+# pins/runtime-gate-vN branch (v6 for the pin below), which the
+# long-lived-branches ruleset in settings.yml protects from deletion, so the
+# pin stays reachable after its feature branch is pruned.
 name: runtime-gate
 
 on:
@@ -511,7 +514,7 @@ jobs:
 
       - name: Start app (static)
         if: inputs.mode == 'static'
-        uses: rishitank/.github/.github/actions/runtime-gate@469ce6b10e6b7bd784f8f3a1baf49c7c512718a6
+        uses: rishitank/.github/.github/actions/runtime-gate@e82d280b5cd2e482eaf361a05bf3aa4da2323b86
         with:
           mode: serve
           serve-dir: ${{ inputs.working-directory }}/${{ inputs.static-dir }}
@@ -583,7 +586,7 @@ jobs:
       - name: Crawl
         id: crawl
         continue-on-error: true
-        uses: rishitank/.github/.github/actions/runtime-gate@469ce6b10e6b7bd784f8f3a1baf49c7c512718a6
+        uses: rishitank/.github/.github/actions/runtime-gate@e82d280b5cd2e482eaf361a05bf3aa4da2323b86
         with:
           mode: crawl
           url: ${{ env.RG_BASE }}
@@ -637,7 +640,7 @@ jobs:
       - name: Explore (AI, advisory)
         if: steps.plan.outputs.explore == 'true'
         continue-on-error: true
-        uses: rishitank/.github/.github/actions/runtime-gate@469ce6b10e6b7bd784f8f3a1baf49c7c512718a6
+        uses: rishitank/.github/.github/actions/runtime-gate@e82d280b5cd2e482eaf361a05bf3aa4da2323b86
         with:
           mode: explore
           url: ${{ env.RG_BASE }}
