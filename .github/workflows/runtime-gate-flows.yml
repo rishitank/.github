@@ -113,7 +113,7 @@ jobs:
         id: merge
         if: steps.collect.outputs.files != ''
         # Same commit as runtime-gate.yml; pins/runtime-gate-v6 keeps it reachable.
-        uses: rishitank/.github/.github/actions/runtime-gate@549fc9ab2849029d91776d14460776adf12a6d0c
+        uses: rishitank/.github/.github/actions/runtime-gate@c75688c0f77a07bd82029f2d27dfd6685d0d4e84
         with:
           mode: merge-flows
           flows-new: ${{ steps.collect.outputs.files }}
