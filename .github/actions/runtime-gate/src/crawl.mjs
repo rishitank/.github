@@ -334,11 +334,12 @@ function baselineCoverage() {
 // decodes the same pixels on every Node version.
 //
 // One flaw of the streaming parser is handled here too. pngjs 7.0.0 (its
-// last release) emits a too-short image's "Unexpected end of input" from an
-// internal filter stream nobody listens to, so the error is uncaught and the
-// callback never runs. That stream exists by the time pngjs emits
+// last release) emits some decode errors from an internal filter stream
+// nobody listens to: a too-short image's "Unexpected end of input", or an
+// unknown filter type in corrupt image data. The error is then uncaught and
+// the callback never runs. That stream exists by the time pngjs emits
 // "metadata", before any image data is inflated, so listening on it then
-// turns that case into a rejection like any other. The "a corrupt baseline
+// turns those cases into a rejection like any other. The "a corrupt baseline
 // screenshot" test in test/upgrades.test.mjs pins this; recheck it if pngjs
 // is ever upgraded.
 function readPng(file) {
@@ -361,8 +362,14 @@ async function diff(name) {
   const before = path.join(BASE_SCREENS, `${name}.png`);
   const after = path.join(SCREENS, `${name}.png`);
   if (!fs.existsSync(before) || !fs.existsSync(after)) return null;
-  const a = await readPng(before);
-  const b = await readPng(after);
+  // Say which side is bad: the baseline is an older run's artifact, while
+  // this run's screenshot would point at the crawl itself.
+  const read = (file, side) =>
+    readPng(file).catch((err) => {
+      throw new Error(`${side} is unreadable (${err.message})`);
+    });
+  const a = await read(before, 'the baseline copy');
+  const b = await read(after, "this run's copy");
   const width = Math.min(a.width, b.width);
   const height = Math.min(a.height, b.height);
   const crop = (img) => {

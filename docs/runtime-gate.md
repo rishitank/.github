@@ -17,7 +17,7 @@ cases to write or maintain.
 | Layer | Blocks merge? | What it catches |
 |---|---|---|
 | **Crawl** | **Yes** | See below. |
-| **Visual diff** | No (advisory) | Every screenshot is compared with the last successful run on the base branch. Changes over 0.2% of pixels are listed in the PR comment, with diff images in the artifact. |
+| **Visual diff** | No (advisory) | Every screenshot is compared with the last successful run on the base branch. Changes over 0.2% of pixels are listed in the PR comment, with diff images in the artifact. A screenshot that can't be compared is listed as a warning. |
 | **AI explorer** | No (advisory) | See below. |
 
 **Crawl.** It finds pages from `/`, any `routes` you list, `sitemap.xml` and
@@ -332,9 +332,11 @@ The explorer reads this file as operator instructions.
   - self-tests with good and broken fixture sites, and a small dynamic app
     with sign-up, sign-in, a flaky page and an injection page
 - `.github/workflows/runtime-gate.yml`: the reusable workflow. It pins the
-  toolkit by commit, so move both together.
+  toolkit by commit, so move both together. A `pins/runtime-gate-vN` branch
+  keeps each pinned commit reachable, and the `long-lived-branches` ruleset
+  stops it being deleted.
 - `.github/workflows/runtime-gate-flows.yml`: saves recorded flows to the
-  repo through a reviewed PR.
+  repo through a reviewed PR. It pins the toolkit to the same commit.
 - `.github/workflows/runtime-gate-selftest.yml`: proves the crawler passes a
   healthy site and catches each kind of breakage in a broken one, and runs
   the reusable workflow end to end, signed out and signed in, on every change

@@ -133,8 +133,8 @@ test('signs up, signs in and crawls behind the login; coverage is reported', () 
 });
 
 // A PNG whose header promises twice the rows its image data holds: a valid
-// zlib stream that inflates short, which pngjs's streaming parser used to
-// surface as an uncaught exception instead of an error.
+// zlib stream that inflates short. pngjs's streaming parser throws that as
+// an uncaught exception unless readPng listens for it.
 function shortPng() {
   const table = Array.from({ length: 256 }, (_, n) => {
     let c = n;
@@ -181,6 +181,7 @@ test('a visual change against the baseline is reported with a diff image; a corr
   for (const f of [short, garbage]) {
     const finding = r.report.findings.find((x) => x.kind === 'visual-diff-failed' && x.message.includes(f));
     assert.ok(finding && !finding.blocking, `${f}: ${JSON.stringify(r.report.findings, null, 1)}`);
+    assert.match(finding.message, /the baseline copy is unreadable/);
   }
   assert.match(fs.readFileSync(path.join(r.out, 'crawl.md'), 'utf8'), /Visual changes vs the default branch/);
 });
