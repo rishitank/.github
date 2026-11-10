@@ -515,6 +515,7 @@ jobs:
 
       - name: Start app (static)
         if: inputs.mode == 'static'
+        # pins/runtime-gate-v6 keeps this commit reachable (see the header comment).
         uses: rishitank/.github/.github/actions/runtime-gate@d95c6c4882012b8a4eefa2d46895872f3caba3a2
         with:
           mode: serve
@@ -587,6 +588,7 @@ jobs:
       - name: Crawl
         id: crawl
         continue-on-error: true
+        # pins/runtime-gate-v6 keeps this commit reachable (see the header comment).
         uses: rishitank/.github/.github/actions/runtime-gate@d95c6c4882012b8a4eefa2d46895872f3caba3a2
         with:
           mode: crawl
@@ -641,6 +643,7 @@ jobs:
       - name: Explore (AI, advisory)
         if: steps.plan.outputs.explore == 'true'
         continue-on-error: true
+        # pins/runtime-gate-v6 keeps this commit reachable (see the header comment).
         uses: rishitank/.github/.github/actions/runtime-gate@d95c6c4882012b8a4eefa2d46895872f3caba3a2
         with:
           mode: explore
