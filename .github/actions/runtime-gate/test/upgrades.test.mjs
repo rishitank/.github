@@ -183,7 +183,9 @@ test('a visual change against the baseline is reported with a diff image; a corr
     assert.ok(finding && !finding.blocking, `${f}: ${JSON.stringify(r.report.findings, null, 1)}`);
     assert.match(finding.message, /the baseline copy is unreadable/);
   }
-  assert.match(fs.readFileSync(path.join(r.out, 'crawl.md'), 'utf8'), /Visual changes vs the default branch/);
+  const md = fs.readFileSync(path.join(r.out, 'crawl.md'), 'utf8');
+  assert.match(md, /Visual changes vs the default branch/);
+  assert.match(md, /Visual comparison incomplete: 2 screenshots could not be compared/);
 });
 
 test('a crash behind the login fails the run; quarantine makes it non-blocking', () => {

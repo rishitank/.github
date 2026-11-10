@@ -949,14 +949,21 @@ export function renderMarkdown(r) {
     lines.push('');
   }
   if (r.baseline === 'compared') {
+    // A screenshot that could not be compared is only a warning, so say here
+    // that the comparison is incomplete rather than report no changes.
+    const uncompared = r.findings.filter((f) => f.kind === 'visual-diff-failed').length;
     if (r.visual.length) {
       lines.push(`**Visual changes vs the default branch** (advisory, ${r.visual.length}):`);
       for (const v of r.visual.slice(0, 20)) {
         lines.push(`- \`${v.url || v.name}\`: ${(v.ratio * 100).toFixed(1)}% of pixels differ${v.resized ? `, size ${v.before.join('×')} → ${v.after.join('×')}` : ''}`);
       }
       lines.push('');
-    } else {
+    } else if (!uncompared) {
       lines.push('No visual changes against the last default-branch run.');
+      lines.push('');
+    }
+    if (uncompared) {
+      lines.push(`Visual comparison incomplete: ${uncompared} screenshot${uncompared === 1 ? '' : 's'} could not be compared (see the warnings).`);
       lines.push('');
     }
   }
