@@ -511,7 +511,7 @@ jobs:
 
       - name: Start app (static)
         if: inputs.mode == 'static'
-        uses: rishitank/.github/.github/actions/runtime-gate@9842c78a4caec4d9a5ae2305533175a5c6cee0f9
+        uses: rishitank/.github/.github/actions/runtime-gate@469ce6b10e6b7bd784f8f3a1baf49c7c512718a6
         with:
           mode: serve
           serve-dir: ${{ inputs.working-directory }}/${{ inputs.static-dir }}
@@ -583,7 +583,7 @@ jobs:
       - name: Crawl
         id: crawl
         continue-on-error: true
-        uses: rishitank/.github/.github/actions/runtime-gate@9842c78a4caec4d9a5ae2305533175a5c6cee0f9
+        uses: rishitank/.github/.github/actions/runtime-gate@469ce6b10e6b7bd784f8f3a1baf49c7c512718a6
         with:
           mode: crawl
           url: ${{ env.RG_BASE }}
@@ -637,7 +637,7 @@ jobs:
       - name: Explore (AI, advisory)
         if: steps.plan.outputs.explore == 'true'
         continue-on-error: true
-        uses: rishitank/.github/.github/actions/runtime-gate@9842c78a4caec4d9a5ae2305533175a5c6cee0f9
+        uses: rishitank/.github/.github/actions/runtime-gate@469ce6b10e6b7bd784f8f3a1baf49c7c512718a6
         with:
           mode: explore
           url: ${{ env.RG_BASE }}
@@ -673,25 +673,37 @@ jobs:
         env:
           CRAWL: ${{ steps.crawl.outcome }}
 
+      # Both uploads are evidence, not the verdict (that is the Verdict step
+      # below), so a failed upload - the account's artifact storage quota
+      # full, say - must not fail the gate. The comment job says so when the
+      # report is missing.
       - name: Upload report
         if: always()
+        continue-on-error: true
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: runtime-gate
           path: ${{ env.RG_REPORT }}
-          retention-days: 14
+          # Long enough to read a PR's report; each run's screenshots are
+          # the biggest artifact most callers keep.
+          retention-days: 7
           if-no-files-found: ignore
 
       # The base branch's screenshots and coverage become the next PR's baseline.
+      # Every push to the base branch keeps one, so 14 days rather than 30:
+      # the weekly scheduled run in the documented caller renews it, and with
+      # none left a PR simply has no visual diff (advisory) until the next
+      # base-branch run.
       - name: Upload baseline
         if: steps.crawl.outcome == 'success' && github.event_name != 'pull_request'
+        continue-on-error: true
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: runtime-gate-baseline
           path: |
             ${{ env.RG_REPORT }}/screens
             ${{ env.RG_REPORT }}/crawl.json
-          retention-days: 30
+          retention-days: 14
           if-no-files-found: ignore
 
       - name: Stop app
@@ -725,6 +737,7 @@ jobs:
       pull-requests: write
     steps:
       - name: Download the report
+        id: download
         continue-on-error: true
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -740,14 +753,32 @@ jobs:
           REPORT: ${{ runner.temp }}/rg-report
           EXPLORE_REASON: ${{ needs.runtime.outputs.explore-reason || 'the runtime job did not get that far' }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          DOWNLOAD: ${{ steps.download.outcome }}
+          RUNTIME_RESULT: ${{ needs.runtime.result }}
         with:
           script: |
             const fs = require('fs');
             const read = (f) => (fs.existsSync(`${process.env.REPORT}/${f}`) ? fs.readFileSync(`${process.env.REPORT}/${f}`, 'utf8') : '');
-            const crawl = read('crawl.md') || `### ❌ Runtime crawl did not produce a report\n\nThe app may not have started. See the [run log](${process.env.RUN_URL}).`;
+            // No report artifact is not the same as no report: the upload is
+            // allowed to fail (storage quota), so say which is likelier, with
+            // the runtime job's own verdict.
+            const downloaded = process.env.DOWNLOAD === 'success';
+            const passed = process.env.RUNTIME_RESULT === 'success';
+            let missing;
+            if (downloaded) {
+              missing = `### ❌ Runtime crawl did not produce a report\n\nThe app may not have started. See the [run log](${process.env.RUN_URL}).`;
+            } else if (passed) {
+              missing = `### ✅ Runtime gate passed\n\nIts report artifact could not be downloaded (most likely the upload failed, for example because the account's artifact storage is full), so the details are only in the [run log](${process.env.RUN_URL}).`;
+            } else {
+              missing = `### ❌ Runtime gate did not pass\n\nNo report artifact could be downloaded. Either the app never started (a failed build or start leaves nothing to upload) or the upload itself failed, for example because the account's artifact storage is full. See the [run log](${process.env.RUN_URL}).`;
+            }
+            const crawl = read('crawl.md') || missing;
             const explore = read('explore.md') || `_AI explorer not run: ${process.env.EXPLORE_REASON}. Add the \`ai-explore\` label to request one._`;
             const marker = '<!-- runtime-gate-report -->';
-            let body = [marker, '## 🧪 Runtime gate', '', crawl, '', explore, '', `Screenshots, diffs and the app log: [runtime-gate artifact](${process.env.RUN_URL}).`].join('\n');
+            const footer = downloaded
+              ? `Screenshots, diffs and the app log: [runtime-gate artifact](${process.env.RUN_URL}).`
+              : `No runtime-gate artifact for this run; see the [run log](${process.env.RUN_URL}).`;
+            let body = [marker, '## 🧪 Runtime gate', '', crawl, '', explore, '', footer].join('\n');
             if (body.length > 60000) body = `${body.slice(0, 60000)}\n\n… truncated, full report in the artifact.`;
             const { data: comments } = await github.rest.issues.listComments({ owner: context.repo.owner, repo: context.repo.repo, issue_number: context.issue.number, per_page: 100 });
             const existing = comments.find((c) => c.body && c.body.includes(marker));

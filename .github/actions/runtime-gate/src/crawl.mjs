@@ -326,13 +326,24 @@ function baselineCoverage() {
   try { return JSON.parse(fs.readFileSync(f, 'utf8')).coverage || null; } catch { return null; }
 }
 
-function diff(name) {
+// PNG.sync.read inflates through pngjs's own subclass of zlib.Inflate, which
+// calls the parent as a function (Inflate.call(this)). From Node 27 (seen on
+// 27.0.0-alpha) zlib's classes are real ES classes, so that throws "Class
+// constructor Inflate cannot be invoked without 'new'". The streaming parser
+// uses zlib.createInflate() and decodes the same pixels on every Node version.
+function readPng(file) {
+  return new Promise((resolve, reject) => {
+    new PNG().parse(fs.readFileSync(file), (err, png) => (err ? reject(err) : resolve(png)));
+  });
+}
+
+async function diff(name) {
   if (!BASE_SCREENS) return null;
   const before = path.join(BASE_SCREENS, `${name}.png`);
   const after = path.join(SCREENS, `${name}.png`);
   if (!fs.existsSync(before) || !fs.existsSync(after)) return null;
-  const a = PNG.sync.read(fs.readFileSync(before));
-  const b = PNG.sync.read(fs.readFileSync(after));
+  const a = await readPng(before);
+  const b = await readPng(after);
   const width = Math.min(a.width, b.width);
   const height = Math.min(a.height, b.height);
   const crop = (img) => {
@@ -757,7 +768,7 @@ async function main() {
   }
   if (BASE_SCREENS) {
     for (const f of fs.readdirSync(SCREENS)) {
-      const d = diff(f.replace(/\.png$/, ''));
+      const d = await diff(f.replace(/\.png$/, ''));
       if (d) visual.push({ ...d, url: urlByShot.get(d.name) || '' });
     }
   }

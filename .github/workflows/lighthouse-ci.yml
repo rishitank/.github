@@ -215,16 +215,48 @@ jobs:
 
       - name: Upload Lighthouse results
         if: always() && steps.config.outputs.found == 'true'
+        # The reports are evidence, not the verdict: a failed upload (the
+        # account's artifact storage quota full, say) must not fail a job
+        # whose audit ran. 7 days is enough to open a report and keeps each
+        # run's storage short.
+        continue-on-error: true
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: lighthouse-results
           path: .lighthouseci/
-          retention-days: 14
+          retention-days: 7
           if-no-files-found: ignore
           # .lighthouseci is dotfile-prefixed; upload-artifact skips hidden
           # files by default and silently drops the whole run's reports —
           # rishitank-recipes hit exactly this before this workflow existed.
           include-hidden-files: true
+
+      - name: Write a manifest for the comment
+        # lhci writes a manifest.json only for the filesystem upload target,
+        # into that target's outputDir. With temporary-public-storage, the
+        # usual target, there is none, so the comment had nothing to read and
+        # was never posted. Dumping the runs autorun collected with the
+        # filesystem target gives the comment a manifest either way. It needs
+        # no network, and it writes outside .lighthouseci so the artifact
+        # above is unchanged.
+        id: manifest
+        if: >-
+          always() && inputs.comment && steps.config.outputs.found == 'true' &&
+          github.event_name == 'pull_request'
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          if [ -f .lighthouseci/manifest.json ]; then
+            echo "path=.lighthouseci/manifest.json" >> "$GITHUB_OUTPUT"
+          elif compgen -G '.lighthouseci/lhr-*.json' > /dev/null; then
+            out="${RUNNER_TEMP}/lhci-manifest"
+            npx --yes "@lhci/cli@${LHCI_VERSION}" upload --target=filesystem --outputDir="${out}"
+            echo "path=${out}/manifest.json" >> "$GITHUB_OUTPUT"
+          else
+            echo "No Lighthouse runs were collected, so there is nothing to summarise."
+          fi
+        env:
+          LHCI_VERSION: ${{ inputs.lhci-version }}
 
       - name: Comment on PR
         if: >-
@@ -238,13 +270,14 @@ jobs:
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           STRICT: ${{ inputs.strict }}
+          MANIFEST: ${{ steps.manifest.outputs.path }}
         with:
           script: |
             const fs = require('fs');
 
-            const manifestPath = '.lighthouseci/manifest.json';
+            const manifestPath = process.env.MANIFEST || '.lighthouseci/manifest.json';
             if (!fs.existsSync(manifestPath)) {
-              core.warning('No .lighthouseci/manifest.json — lhci did not produce a report, skipping the PR comment.');
+              core.warning(`No ${manifestPath} — lhci did not produce a report, skipping the PR comment.`);
               return;
             }
             const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
@@ -276,9 +309,20 @@ jobs:
               if (run.isRepresentativeRun) byUrl.set(run.url, run);
             }
 
+            // The manifest is keyed by the URL that was requested, links.json
+            // by the URL the page ended on, so a redirect (a trailing slash,
+            // a locale) needs the run's finalUrl to find its report link.
+            const finalUrl = (run) => {
+              try {
+                return JSON.parse(fs.readFileSync(run.jsonPath, 'utf8')).finalUrl;
+              } catch {
+                return undefined;
+              }
+            };
+
             const rows = [...byUrl.values()].map((run) => {
               const s = run.summary || {};
-              const link = links[run.url];
+              const link = links[finalUrl(run)] ?? links[run.url];
               const urlCell = link ? `[${run.url}](${link})` : run.url;
               return `| ${urlCell} | ${grade(s.performance)} | ${grade(s.accessibility)} | ${grade(s['best-practices'])} | ${grade(s.seo)} |`;
             });
